@@ -19,6 +19,7 @@ from encryption import decrypt_api_key
 from llm.base import LLMMessage
 from llm.provider_factory import create_provider_from_config
 from mcp_client import connect_mcp_server, parse_mcp_tool_name, MCPConnection
+from workflow_autosave import auto_save_workflow_output_sqlite
 
 if DATABASE_TYPE == "mongo":
     from database_mongo import get_database
@@ -737,15 +738,25 @@ async def _execute_workflow_sqlite(run, workflow, sorted_steps, step_results, us
                 return
 
         # Workflow complete
+        final_output = previous_output
+        saved_doc = auto_save_workflow_output_sqlite(workflow, run_id, previous_output, db)
+        if saved_doc:
+            final_output = (
+                f"{previous_output}\n\n---\n"
+                f"Saved automatically to KB \"{saved_doc['kb_name']}\" "
+                f"as \"{saved_doc['doc_name']}\" (document #{saved_doc['doc_id']})."
+            )
         _update_run(db, run_id, {
             "status": "completed",
-            "final_output": previous_output,
+            "final_output": final_output,
             "completed_at": datetime.now(timezone.utc),
             "steps_json": json.dumps(step_results),
         })
+        if saved_doc:
+            yield {"event": "kb_document_saved", "data": json.dumps(saved_doc)}
         yield {
             "event": "workflow_complete",
-            "data": json.dumps({"run_id": str(run_id), "final_output": previous_output}),
+            "data": json.dumps({"run_id": str(run_id), "final_output": final_output}),
         }
         yield {"event": "done", "data": "{}"}
 
@@ -1188,7 +1199,16 @@ async def _execute_dag_sqlite(run, workflow, steps, user_input, db):
             sink_ids = [nid for nid in all_node_ids if nid not in downstream_deps and nid not in skipped]
             final_output = "\n\n".join(outputs.get(nid, "") for nid in sink_ids if outputs.get(nid))
 
+            saved_doc = auto_save_workflow_output_sqlite(workflow, run_id, final_output, db)
+            if saved_doc:
+                final_output = (
+                    f"{final_output}\n\n---\n"
+                    f"Saved automatically to KB \"{saved_doc['kb_name']}\" "
+                    f"as \"{saved_doc['doc_name']}\" (document #{saved_doc['doc_id']})."
+                )
             _update({"status": "completed", "final_output": final_output, "completed_at": datetime.now(timezone.utc), "steps_json": _snapshot(), "running_nodes_json": "[]"})
+            if saved_doc:
+                yield {"event": "kb_document_saved", "data": json.dumps(saved_doc)}
             yield {"event": "workflow_complete", "data": json.dumps({"run_id": str(run_id), "final_output": final_output})}
 
         yield {"event": "done", "data": "{}"}

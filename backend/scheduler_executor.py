@@ -10,6 +10,7 @@ import logging
 import os
 import time
 from datetime import datetime, timezone
+from workflow_autosave import auto_save_workflow_output_sqlite
 
 logger = logging.getLogger(__name__)
 
@@ -223,9 +224,17 @@ async def run_scheduled_workflow_sqlite(schedule_id: int):
                 return
 
         # All steps done
+        final_output = previous_output
+        saved_doc = auto_save_workflow_output_sqlite(workflow, run_id, previous_output, db)
+        if saved_doc:
+            final_output = (
+                f"{previous_output}\n\n---\n"
+                f"Saved automatically to KB \"{saved_doc['kb_name']}\" "
+                f"as \"{saved_doc['doc_name']}\" (document #{saved_doc['doc_id']})."
+            )
         _update_run_sqlite(db, run_id, {
             "status": "completed",
-            "final_output": previous_output,
+            "final_output": final_output,
             "completed_at": datetime.now(timezone.utc),
             "steps_json": json.dumps(step_results),
         })
@@ -393,6 +402,13 @@ async def _run_scheduled_dag_sqlite(schedule, workflow, steps, step_results_list
                 downstream_deps.add(dep)
         sink_ids = [nid for nid in all_node_ids if nid not in downstream_deps]
         final_output = "\n\n".join(outputs.get(nid, "") for nid in sink_ids if outputs.get(nid))
+        saved_doc = auto_save_workflow_output_sqlite(workflow, run_id, final_output, db)
+        if saved_doc:
+            final_output = (
+                f"{final_output}\n\n---\n"
+                f"Saved automatically to KB \"{saved_doc['kb_name']}\" "
+                f"as \"{saved_doc['doc_name']}\" (document #{saved_doc['doc_id']})."
+            )
         _update_run_sqlite(db, run_id, {"status": "completed", "final_output": final_output, "completed_at": datetime.now(timezone.utc), "steps_json": _snapshot()})
 
     schedule.last_run_at = datetime.now(timezone.utc)
