@@ -1,11 +1,10 @@
 "use client"
 
-import { useEffect, useRef, useState, useCallback } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { useSession } from "next-auth/react"
 import { useParams, useRouter } from "next/navigation"
 import { apiClient } from "@/lib/api-client"
 import type { WAChannel, Agent, UpdateWAChannelRequest } from "@/types/playground"
-import { AppRoutes } from "@/app/api/routes"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -73,9 +72,16 @@ const CLASSIC_VOICES = [
 // Fallback script used while the agent-generated one loads
 const VOICE_GUIDE_SCRIPT_FALLBACK = `Hi, I'm recording a short voice sample. The quick brown fox jumps over the lazy dog. I believe every conversation is an opportunity to connect, learn, and grow. Clear communication is at the heart of everything I do. Whether answering questions, solving problems, or sharing ideas, I aim to be helpful, accurate, and easy to understand. Today is a great day to learn something new, and I'm here to help every step of the way. Thank you for taking the time to listen.`
 
+type TTSBackend = "auto" | "qwen" | "classic"
+
+function normalizeTTSBackend(value: string | null | undefined): TTSBackend {
+  return value === "qwen" || value === "classic" ? value : "auto"
+}
+
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
-function StatusBadge({ status }: { status: WAChannel["status"] }) {
+function StatusBadge({ status, routingEnabled }: { status: WAChannel["status"]; routingEnabled: boolean }) {
+  if (!routingEnabled) return <Badge variant="secondary">Paused</Badge>
   if (status === "connected")   return <Badge className="bg-emerald-500/15 text-emerald-600 border-emerald-500/30">Connected</Badge>
   if (status === "pending_qr") return <Badge className="bg-amber-500/15 text-amber-600 border-amber-500/30">Awaiting QR scan</Badge>
   return <Badge variant="secondary">Disconnected</Badge>
@@ -108,7 +114,8 @@ function VoiceCloneDialog({ open, onOpenChange, channelId, onSuccess }: VoiceClo
 
   // Reset and fetch agent script when dialog opens
   useEffect(() => {
-    if (open) {
+    if (!open) return
+    const timer = window.setTimeout(() => {
       setMode("guide")
       setRecording(false)
       setRecorded(null)
@@ -122,8 +129,9 @@ function VoiceCloneDialog({ open, onOpenChange, channelId, onSuccess }: VoiceClo
         .then((res) => setVoiceScript(res.script))
         .catch(() => {/* keep fallback */})
         .finally(() => setScriptLoading(false))
-    }
-  }, [open])
+    }, 0)
+    return () => window.clearTimeout(timer)
+  }, [open, channelId])
 
   const startRecording = async () => {
     try {
@@ -162,8 +170,8 @@ function VoiceCloneDialog({ open, onOpenChange, channelId, onSuccess }: VoiceClo
       toast.success("Voice sample saved")
       onOpenChange(false)
       onSuccess()
-    } catch (e: any) {
-      toast.error(e.message || "Upload failed")
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Upload failed")
     } finally {
       setUploading(false)
     }
@@ -197,7 +205,7 @@ function VoiceCloneDialog({ open, onOpenChange, channelId, onSuccess }: VoiceClo
                   Read this aloud:
                   {scriptLoading && <span className="ml-2 normal-case font-normal animate-pulse">generating…</span>}
                 </p>
-                <p className="text-lg leading-loose italic">"{voiceScript}"</p>
+                <p className="text-lg leading-loose italic">&quot;{voiceScript}&quot;</p>
               </div>
               <p className="text-sm text-muted-foreground shrink-0">
                 Tip: speak naturally at a normal pace in a quiet environment. The recording should be at least 5 seconds.
@@ -219,7 +227,7 @@ function VoiceCloneDialog({ open, onOpenChange, channelId, onSuccess }: VoiceClo
               {/* Left: script */}
               <div className="flex-1 rounded-md border bg-muted/20 p-6 overflow-y-auto">
                 <p className="text-sm font-semibold text-muted-foreground uppercase tracking-wide mb-4">Script:</p>
-                <p className="text-lg leading-loose italic text-muted-foreground">"{voiceScript}"</p>
+                <p className="text-lg leading-loose italic text-muted-foreground">&quot;{voiceScript}&quot;</p>
               </div>
               {/* Right: controls */}
               <div className="w-72 shrink-0 flex flex-col gap-5">
@@ -368,7 +376,7 @@ export default function ChannelDetailPage() {
   const [voiceReplyJids, setVoiceReplyJids] = useState<string[]>([])
   const [voiceReplyAllContacts, setVoiceReplyAllContacts] = useState(true)
   const [voiceReplyVoice, setVoiceReplyVoice] = useState("Ryan")
-  const [ttsBackend, setTtsBackend] = useState<"auto" | "qwen" | "classic">("auto")
+  const [ttsBackend, setTtsBackend] = useState<TTSBackend>("auto")
   const [newVoiceJid, setNewVoiceJid] = useState("")
 
   // Voice clone dialog
@@ -382,31 +390,7 @@ export default function ChannelDetailPage() {
   const [disconnecting, setDisconnecting] = useState(false)
   const qrEventSourceRef = useRef<EventSource | null>(null)
 
-  useEffect(() => {
-    if (!authSession?.accessToken) return
-    apiClient.setAccessToken(authSession.accessToken as string)
-    load()
-    return () => qrEventSourceRef.current?.close()
-  }, [authSession?.accessToken, channelId])
-
-  const load = async () => {
-    setIsLoading(true)
-    try {
-      const [ch, ags] = await Promise.all([
-        apiClient.getWAChannel(channelId),
-        apiClient.listAgents(),
-      ])
-      applyChannel(ch)
-      setAgents(ags)
-      if (ch.status === "pending_qr") startQRStream()
-    } catch {
-      toast.error("Failed to load channel")
-    } finally {
-      setIsLoading(false)
-    }
-  }
-
-  const applyChannel = (ch: WAChannel) => {
+  const applyChannel = useCallback((ch: WAChannel) => {
     setChannel(ch)
     setEditName(ch.name)
     setEditAgentId(String(ch.agent_id))
@@ -418,10 +402,10 @@ export default function ChannelDetailPage() {
     setVoiceReplyJids(ch.voice_reply_jids ?? [])
     setVoiceReplyAllContacts((ch.voice_reply_jids ?? []).length === 0)
     setVoiceReplyVoice(ch.voice_reply_voice ?? "Ryan")
-    setTtsBackend((ch.tts_backend as any) ?? "auto")
-  }
+    setTtsBackend(normalizeTTSBackend(ch.tts_backend))
+  }, [])
 
-  const startQRStream = () => {
+  const startQRStream = useCallback(() => {
     qrEventSourceRef.current?.close()
     setQrConnecting(true)
     setQrDataUrl(null)
@@ -429,15 +413,15 @@ export default function ChannelDetailPage() {
     qrEventSourceRef.current = es
     es.onmessage = async (e) => {
       try {
-        const data = JSON.parse(e.data)
+        const data = JSON.parse(e.data) as { type?: string; qr?: string; error?: string }
         if (data.type === "qr") {
-          setQrDataUrl(data.qr)
+          setQrDataUrl(data.qr ?? null)
           setQrConnecting(false)
         } else if (data.type === "connected") {
           es.close()
           setQrDataUrl(null)
           setQrConnecting(false)
-          setChannel((prev) => prev ? { ...prev, status: "connected" } : prev)
+          setChannel((prev) => prev ? { ...prev, routing_enabled: true, status: "connected" } : prev)
           toast.success("WhatsApp connected!")
         } else if (data.error) {
           toast.error(`QR error: ${data.error}`)
@@ -447,13 +431,42 @@ export default function ChannelDetailPage() {
       } catch { /* ignore */ }
     }
     es.onerror = () => { setQrConnecting(false); es.close() }
-  }
+  }, [channelId])
+
+  const load = useCallback(async () => {
+    setIsLoading(true)
+    try {
+      const [ch, ags] = await Promise.all([
+        apiClient.getWAChannel(channelId),
+        apiClient.listAgents(),
+      ])
+      applyChannel(ch)
+      setAgents(ags)
+      if (ch.routing_enabled && ch.status === "pending_qr") startQRStream()
+    } catch {
+      toast.error("Failed to load channel")
+    } finally {
+      setIsLoading(false)
+    }
+  }, [applyChannel, channelId, startQRStream])
+
+  useEffect(() => {
+    if (!authSession?.accessToken) return
+    apiClient.setAccessToken(authSession.accessToken as string)
+    const timer = window.setTimeout(() => {
+      void load()
+    }, 0)
+    return () => {
+      window.clearTimeout(timer)
+      qrEventSourceRef.current?.close()
+    }
+  }, [authSession?.accessToken, load])
 
   const handleConnect = async () => {
     setConnecting(true)
     try {
       await apiClient.connectWAChannel(channelId)
-      setChannel((prev) => prev ? { ...prev, status: "pending_qr" } : prev)
+      setChannel((prev) => prev ? { ...prev, routing_enabled: true, status: "pending_qr" } : prev)
       startQRStream()
     } catch {
       toast.error("Failed to connect channel")
@@ -467,11 +480,11 @@ export default function ChannelDetailPage() {
     try {
       qrEventSourceRef.current?.close()
       await apiClient.disconnectWAChannel(channelId)
-      setChannel((prev) => prev ? { ...prev, status: "disconnected" } : prev)
+      setChannel((prev) => prev ? { ...prev, routing_enabled: false, status: "disconnected" } : prev)
       setQrDataUrl(null)
-      toast.success("Disconnected")
+      toast.success("Channel paused")
     } catch {
-      toast.error("Failed to disconnect")
+      toast.error("Failed to pause channel")
     } finally {
       setDisconnecting(false)
     }
@@ -575,7 +588,7 @@ export default function ChannelDetailPage() {
           </Button>
           <div className="flex-1 flex items-center gap-2">
             <h1 className="text-lg font-semibold">{channel.name}</h1>
-            <StatusBadge status={channel.status} />
+            <StatusBadge status={channel.status} routingEnabled={channel.routing_enabled} />
           </div>
         </div>
 
@@ -589,20 +602,20 @@ export default function ChannelDetailPage() {
               </p>
             </div>
             <div className="flex gap-2">
-              {channel.status !== "connected" ? (
+              {!channel.routing_enabled || channel.status !== "connected" ? (
                 <Button size="sm" onClick={handleConnect} disabled={connecting || channel.status === "pending_qr"} className="gap-1.5">
                   {connecting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Wifi className="h-3.5 w-3.5" />}
-                  {channel.status === "pending_qr" ? "Waiting for scan..." : "Connect"}
+                  {channel.status === "pending_qr" ? "Waiting for scan..." : "Resume"}
                 </Button>
               ) : (
                 <Button size="sm" variant="outline" onClick={handleDisconnect} disabled={disconnecting} className="gap-1.5">
                   {disconnecting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <WifiOff className="h-3.5 w-3.5" />}
-                  Disconnect
+                  Pause
                 </Button>
               )}
             </div>
           </div>
-          {channel.status === "pending_qr" && (
+          {channel.routing_enabled && channel.status === "pending_qr" && (
             <div className="flex flex-col items-center gap-3 pt-2">
               {qrConnecting && !qrDataUrl && (
                 <div className="flex items-center gap-2 text-sm text-muted-foreground">
@@ -706,7 +719,7 @@ export default function ChannelDetailPage() {
                 {/* TTS backend */}
                 <div className="space-y-1.5">
                   <Label className="text-xs">TTS engine</Label>
-                  <Select value={ttsBackend} onValueChange={(v) => setTtsBackend(v as any)}>
+                  <Select value={ttsBackend} onValueChange={(v) => setTtsBackend(normalizeTTSBackend(v))}>
                     <SelectTrigger className="h-8 text-xs">
                       <SelectValue />
                     </SelectTrigger>

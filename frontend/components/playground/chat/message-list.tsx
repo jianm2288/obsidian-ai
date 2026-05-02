@@ -126,7 +126,7 @@ export function MessageList({
           }
           // Skip other system messages
           if (message.role === "system") return null
-          return <MessageBubble key={message.id} message={message} />
+          return <MessageBubble key={message.id} message={message} accessToken={accessToken} />
         })}
 
         {/* Agent step indicator (team mode) */}

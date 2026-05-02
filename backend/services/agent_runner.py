@@ -36,6 +36,30 @@ MAX_TOOL_ROUNDS = 10
 TOOL_RESULT_PROMPT = "Use this information to answer the user's question."
 
 
+def _fallback_reply_from_tool_result(tool_name: str | None, result: str | None) -> str | None:
+    """Produce a plain-text channel reply if the model never verbalizes a tool result."""
+    if not result:
+        return None
+    try:
+        data = json.loads(result)
+    except Exception:
+        data = result
+
+    if isinstance(data, dict) and tool_name == "get_datetime":
+        dt = data.get("datetime")
+        tz = data.get("timezone") or "UTC"
+        if dt:
+            return f"Current date/time ({tz}): {dt}"
+
+    if isinstance(data, dict):
+        if data.get("error"):
+            return f"Tool '{tool_name}' returned an error: {data['error']}"
+        return f"Tool '{tool_name}' returned: {json.dumps(data, ensure_ascii=False)}"
+    if isinstance(data, list):
+        return f"Tool '{tool_name}' returned: {json.dumps(data, ensure_ascii=False)}"
+    return f"Tool '{tool_name}' returned: {str(data)}"
+
+
 async def run_agent_headless(
     session_id: int | str,
     agent_id: int | str,
@@ -171,7 +195,7 @@ async def preprocess_batch(texts: list[str], llm) -> BatchPlan:
 # ── SQLite ─────────────────────────────────────────────────────────────────────
 
 async def _run_headless_sqlite(session_id: int, agent_id: int, db) -> str | None:
-    from models import Agent, LLMProvider, Message, AgentMemory, ToolDefinition, HITLApproval
+    from models import Agent, LLMProvider, Message, AgentMemory, ToolDefinition, HITLApproval, KnowledgeBase
     from llm.base import LLMMessage
     from llm.provider_factory import create_provider_from_config
     from encryption import decrypt_api_key
@@ -208,6 +232,56 @@ async def _run_headless_sqlite(session_id: int, agent_id: int, db) -> str | None
 
     if not messages:
         return None
+
+    last_user_index = next(
+        (i for i in range(len(messages) - 1, -1, -1) if messages[i].role == "user"),
+        None,
+    )
+    if last_user_index is None:
+        return None
+
+    last_assistant_before_user = next(
+        (i for i in range(last_user_index - 1, -1, -1) if messages[i].role == "assistant"),
+        None,
+    )
+    if last_assistant_before_user is None:
+        messages = [messages[last_user_index]]
+        last_user_index = 0
+    else:
+        latest_user = messages[last_user_index]
+        messages = messages[: last_assistant_before_user + 1] + [latest_user]
+        last_user_index = len(messages) - 1
+
+    if agent.knowledge_base_ids_json:
+        try:
+            kb_ids = [str(kb_id) for kb_id in json.loads(agent.knowledge_base_ids_json)]
+            if kb_ids:
+                kb_records = db.query(KnowledgeBase).filter(
+                    KnowledgeBase.id.in_([int(kb_id) for kb_id in kb_ids if str(kb_id).isdigit()]),
+                    KnowledgeBase.is_active == True,
+                ).all()
+                kb_names = {str(kb.id): kb.name for kb in kb_records}
+                from rag_service import RAGService
+
+                query_text = messages[last_user_index].content or ""
+                kb_chunks = []
+                indexed_kb_ids = {str(kb.id) for kb in kb_records}
+                for kb_id in kb_ids:
+                    if kb_id not in indexed_kb_ids:
+                        continue
+                    if not RAGService.has_kb_index(kb_id):
+                        continue
+                    for result in RAGService.search_kb(kb_id, query_text, top_k=3):
+                        kb_chunks.append(
+                            f"[KB:{result['metadata'].get('doc_name', kb_names.get(kb_id, kb_id))}]:\n{result['text']}"
+                        )
+                if kb_chunks:
+                    messages[last_user_index] = LLMMessage(
+                        role="user",
+                        content=query_text + "\n\nRelevant context from knowledge bases:\n" + "\n\n".join(kb_chunks),
+                    )
+        except Exception as exc:
+            logger.warning("agent_runner: KB context injection failed for agent %s: %s", agent_id, exc)
 
     api_key = decrypt_api_key(provider_record.api_key) if provider_record.api_key else None
     config = json.loads(provider_record.config_json) if provider_record.config_json else None
@@ -254,6 +328,8 @@ async def _run_headless_sqlite(session_id: int, agent_id: int, db) -> str | None
             pass
 
     full_content = ""
+    last_tool_name: str | None = None
+    last_tool_result: str | None = None
 
     for _round in range(MAX_TOOL_ROUNDS):
         tool_calls_collected = []
@@ -333,6 +409,8 @@ async def _run_headless_sqlite(session_id: int, agent_id: int, db) -> str | None
             else:
                 result = _execute_tool(tc.name, tc.arguments, db)
 
+            last_tool_name = tc.name
+            last_tool_result = result
             messages.append(LLMMessage(
                 role="user",
                 content=f"[Tool '{tc.name}' returned: {result}]\n\n{TOOL_RESULT_PROMPT}",
@@ -340,7 +418,22 @@ async def _run_headless_sqlite(session_id: int, agent_id: int, db) -> str | None
 
         full_content = ""
 
-    return _strip_artifacts(full_content) or None
+    final = _strip_artifacts(full_content)
+    if not final and last_tool_result:
+        try:
+            async for chunk in llm.chat_stream(messages, system_prompt=system_prompt, tools=None):
+                if chunk.type == "content":
+                    full_content += chunk.content
+                elif chunk.type == "done":
+                    break
+                elif chunk.type == "error":
+                    logger.error("agent_runner finalization LLM error: %s", chunk.error)
+                    break
+            final = _strip_artifacts(full_content)
+        except Exception as exc:
+            logger.warning("agent_runner finalization failed: %s", exc)
+
+    return final or _fallback_reply_from_tool_result(last_tool_name, last_tool_result)
 
 
 # ── MongoDB ────────────────────────────────────────────────────────────────────
@@ -457,6 +550,8 @@ async def _run_headless_mongo(
             pass
 
     full_content = ""
+    last_tool_name: str | None = None
+    last_tool_result: str | None = None
 
     for _round in range(MAX_TOOL_ROUNDS):
         tool_calls_collected = []
@@ -533,6 +628,8 @@ async def _run_headless_mongo(
             else:
                 result = await _execute_tool_mongo(tc.name, tc.arguments, mongo_db, user_id=_user_id, session_id=session_id)
 
+            last_tool_name = tc.name
+            last_tool_result = result
             messages.append(LLMMessage(
                 role="user",
                 content=f"[Tool '{tc.name}' returned: {result}]\n\n{TOOL_RESULT_PROMPT}",
@@ -540,4 +637,19 @@ async def _run_headless_mongo(
 
         full_content = ""
 
-    return _strip_artifacts(full_content) or None
+    final = _strip_artifacts(full_content)
+    if not final and last_tool_result:
+        try:
+            async for chunk in llm.chat_stream(messages, system_prompt=system_prompt, tools=None):
+                if chunk.type == "content":
+                    full_content += chunk.content
+                elif chunk.type == "done":
+                    break
+                elif chunk.type == "error":
+                    logger.error("agent_runner mongo finalization LLM error: %s", chunk.error)
+                    break
+            final = _strip_artifacts(full_content)
+        except Exception as exc:
+            logger.warning("agent_runner mongo finalization failed: %s", exc)
+
+    return final or _fallback_reply_from_tool_result(last_tool_name, last_tool_result)

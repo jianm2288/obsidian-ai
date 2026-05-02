@@ -9,6 +9,7 @@ import {
 } from "@/components/ui/dialog"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
+import { Textarea } from "@/components/ui/textarea"
 import { useSession } from "next-auth/react"
 import {
   streamWorkflow,
@@ -68,6 +69,7 @@ export function WorkflowRunDialog({
   const abortRef = useRef<AbortController | null>(null)
   const outputRef = useRef<HTMLDivElement>(null)
   const [currentRunLabel] = useState(generateRunId)
+  const [runInput, setRunInput] = useState("")
 
   useEffect(() => {
     if (outputRef.current) {
@@ -78,7 +80,11 @@ export function WorkflowRunDialog({
   const toggleOutput = (key: number | "final") => {
     setExpandedOutputs((prev) => {
       const next = new Set(prev)
-      next.has(key) ? next.delete(key) : next.add(key)
+      if (next.has(key)) {
+        next.delete(key)
+      } else {
+        next.add(key)
+      }
       return next
     })
   }
@@ -98,6 +104,12 @@ export function WorkflowRunDialog({
   const handleRun = async () => {
     if (!session?.accessToken || !workflow || isRunning) return
 
+    const workflowInput = runInput.trim()
+    if (!workflowInput) {
+      setError("Enter workflow input before running.")
+      return
+    }
+
     setIsRunning(true)
     setStatus("running")
     setError(null)
@@ -114,7 +126,7 @@ export function WorkflowRunDialog({
       await streamWorkflow(
         session.accessToken,
         workflow.id,
-        currentRunLabel,
+        workflowInput,
         (event: WorkflowStartEvent) => { void event },
         (event: StepStartEvent) => {
           const sortedSteps = [...workflow.steps].sort((a, b) => a.order - b.order)
@@ -122,7 +134,7 @@ export function WorkflowRunDialog({
           setActiveStepIndex(idx >= 0 ? idx : undefined)
           setStreamingStepOrder(event.step_order)
         },
-        (_stepOrder: number, _content: string) => { /* no streaming content displayed */ },
+        () => { /* no streaming content displayed */ },
         (event: StepCompleteEvent) => {
           const sortedSteps = [...workflow.steps].sort((a, b) => a.order - b.order)
           const idx = sortedSteps.findIndex((s) => s.order === event.step_order)
@@ -219,7 +231,7 @@ export function WorkflowRunDialog({
               {currentRunLabel}
             </span>
             {status === "idle" && (
-              <Button onClick={handleRun} disabled={isRunning} className="gap-2 h-8 px-4 text-xs font-mono">
+              <Button onClick={handleRun} disabled={isRunning || !runInput.trim()} className="gap-2 h-8 px-4 text-xs font-mono">
                 <Play className="h-3.5 w-3.5" />
                 RUN
               </Button>
@@ -317,13 +329,27 @@ export function WorkflowRunDialog({
                 <div>
                   <p className="text-sm font-semibold text-foreground">Ready to run</p>
                   <p className="text-xs text-muted-foreground mt-1 max-w-xs">
-                    Click <span className="font-mono font-semibold text-foreground">RUN</span> to execute this workflow. The pipeline will stream progress in real time.
+                    Enter the request for this workflow, then run it.
                   </p>
                 </div>
+                <Textarea
+                  value={runInput}
+                  onChange={(event) => {
+                    setRunInput(event.target.value)
+                    if (error) setError(null)
+                  }}
+                  placeholder="Ultrasound volume imaging analysis..."
+                  className="w-full max-w-xl min-h-32 resize-none text-left"
+                />
+                {error && (
+                  <div className="rounded-md border border-red-500/20 bg-red-500/5 px-3 py-2 text-xs text-red-400">
+                    {error}
+                  </div>
+                )}
                 <div className="flex items-center gap-2 text-[11px] text-muted-foreground/60 font-mono border border-border rounded-md px-3 py-1.5 bg-muted/20">
                   Run ID: {currentRunLabel}
                 </div>
-                <Button onClick={handleRun} disabled={isRunning} className="gap-2 mt-2">
+                <Button onClick={handleRun} disabled={isRunning || !runInput.trim()} className="gap-2 mt-2">
                   <Play className="h-4 w-4" />
                   Run Workflow
                 </Button>

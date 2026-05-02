@@ -1,10 +1,10 @@
 "use client"
 
-import { useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { useSession } from "next-auth/react"
 import { useParams, useRouter } from "next/navigation"
 import { apiClient } from "@/lib/api-client"
-import type { KnowledgeBase, KBDocument, CreateKBDocumentRequest } from "@/types/playground"
+import type { KnowledgeBase, KBDocument } from "@/types/playground"
 import { usePermissionsStore } from "@/stores/permissions-store"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -25,16 +25,21 @@ import {
   FileText,
   Type,
   Upload,
-  Plus,
   CheckCircle2,
   Clock,
   Loader2,
   Globe,
+  Copy,
 } from "lucide-react"
 import { toast } from "sonner"
 import { useConfirm } from "@/hooks/use-confirm"
+import { MarkdownRenderer } from "@/components/playground/chat/markdown-renderer"
 
 type AddMode = "text" | "file" | null
+
+function errorMessage(err: unknown, fallback: string) {
+  return err instanceof Error ? err.message : fallback
+}
 
 export default function KnowledgeDetailPage() {
   const { data: authSession } = useSession()
@@ -48,6 +53,8 @@ export default function KnowledgeDetailPage() {
   const [documents, setDocuments] = useState<KBDocument[]>([])
   const [isLoading, setIsLoading] = useState(true)
   const [addMode, setAddMode] = useState<AddMode>(null)
+  const [viewingDoc, setViewingDoc] = useState<KBDocument | null>(null)
+  const [isLoadingViewingDoc, setIsLoadingViewingDoc] = useState(false)
 
   // Text form state
   const [textName, setTextName] = useState("")
@@ -69,13 +76,7 @@ export default function KnowledgeDetailPage() {
     variant: "destructive",
   })
 
-  useEffect(() => {
-    if (!authSession?.accessToken) return
-    apiClient.setAccessToken(authSession.accessToken as string)
-    load()
-  }, [authSession?.accessToken, kbId])
-
-  const load = async () => {
+  const load = useCallback(async () => {
     setIsLoading(true)
     try {
       const [kbData, docs] = await Promise.all([
@@ -89,7 +90,13 @@ export default function KnowledgeDetailPage() {
     } finally {
       setIsLoading(false)
     }
-  }
+  }, [kbId])
+
+  useEffect(() => {
+    if (!authSession?.accessToken) return
+    apiClient.setAccessToken(authSession.accessToken as string)
+    void Promise.resolve().then(load)
+  }, [authSession?.accessToken, load])
 
   const handleAddText = async () => {
     if (!textName.trim() || !textContent.trim()) return
@@ -106,8 +113,8 @@ export default function KnowledgeDetailPage() {
       setTextName("")
       setTextContent("")
       toast.success("Document added and indexed")
-    } catch (err: any) {
-      toast.error(err?.message || "Failed to add document")
+    } catch (err: unknown) {
+      toast.error(errorMessage(err, "Failed to add document"))
     } finally {
       setTextLoading(false)
     }
@@ -146,8 +153,8 @@ export default function KnowledgeDetailPage() {
       setFileMediaType(null)
       if (fileInputRef.current) fileInputRef.current.value = ""
       toast.success("File uploaded and indexed")
-    } catch (err: any) {
-      toast.error(err?.message || "Failed to upload file")
+    } catch (err: unknown) {
+      toast.error(errorMessage(err, "Failed to upload file"))
     } finally {
       setFileLoading(false)
     }
@@ -161,8 +168,8 @@ export default function KnowledgeDetailPage() {
       setDocuments((prev) => prev.filter((d) => d.id !== doc.id))
       setKb((prev) => prev ? { ...prev, document_count: Math.max(0, prev.document_count - 1) } : prev)
       toast.success("Document deleted")
-    } catch (err: any) {
-      toast.error(err?.message || "Failed to delete document")
+    } catch (err: unknown) {
+      toast.error(errorMessage(err, "Failed to delete document"))
     }
   }
 
@@ -175,6 +182,32 @@ export default function KnowledgeDetailPage() {
     setFileFilename(null)
     setFileMediaType(null)
     if (fileInputRef.current) fileInputRef.current.value = ""
+  }
+
+  const handleViewDoc = async (doc: KBDocument) => {
+    if (doc.doc_type !== "text") return
+    if (doc.content_text) {
+      setViewingDoc(doc)
+      return
+    }
+
+    setViewingDoc(doc)
+    setIsLoadingViewingDoc(true)
+    try {
+      const freshDocs = await apiClient.listKBDocuments(kbId)
+      setDocuments(freshDocs)
+      setViewingDoc(freshDocs.find((freshDoc) => freshDoc.id === doc.id) ?? doc)
+    } catch (err: unknown) {
+      toast.error(errorMessage(err, "Failed to load document text"))
+    } finally {
+      setIsLoadingViewingDoc(false)
+    }
+  }
+
+  const handleCopyViewingDoc = async () => {
+    if (!viewingDoc?.content_text) return
+    await navigator.clipboard.writeText(viewingDoc.content_text)
+    toast.success("Copied document text")
   }
 
   if (isLoading) {
@@ -257,7 +290,19 @@ export default function KnowledgeDetailPage() {
             {documents.map((doc) => (
               <div
                 key={doc.id}
-                className="flex items-center gap-3 px-4 py-3 rounded-md border border-border bg-card hover:bg-muted/30 transition-colors"
+                role={doc.doc_type === "text" ? "button" : undefined}
+                tabIndex={doc.doc_type === "text" ? 0 : undefined}
+                onClick={() => void handleViewDoc(doc)}
+                onKeyDown={(event) => {
+                  if (doc.doc_type !== "text") return
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault()
+                    void handleViewDoc(doc)
+                  }
+                }}
+                className={`flex items-center gap-3 px-4 py-3 rounded-md border border-border bg-card hover:bg-muted/30 transition-colors ${
+                  doc.doc_type === "text" ? "cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" : ""
+                }`}
               >
                 <div className="shrink-0">
                   {doc.doc_type === "text" ? (
@@ -292,7 +337,10 @@ export default function KnowledgeDetailPage() {
                       variant="ghost"
                       size="icon"
                       className="h-7 w-7 text-muted-foreground hover:text-destructive"
-                      onClick={() => handleDeleteDoc(doc)}
+                      onClick={(event) => {
+                        event.stopPropagation()
+                        handleDeleteDoc(doc)
+                      }}
                     >
                       <Trash2 className="h-3.5 w-3.5" />
                     </Button>
@@ -304,16 +352,49 @@ export default function KnowledgeDetailPage() {
         )}
       </div>
 
+      {/* Text Viewer Dialog */}
+      <Dialog open={!!viewingDoc} onOpenChange={(open) => !open && setViewingDoc(null)}>
+        <DialogContent className="sm:max-w-4xl max-h-[85vh] flex flex-col">
+          <DialogHeader>
+            <DialogTitle className="truncate pr-6">{viewingDoc?.name}</DialogTitle>
+            <DialogDescription>
+              {viewingDoc?.indexed ? "Indexed text document" : "Text document"}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="min-h-0 flex-1 overflow-y-auto rounded-md border border-border bg-muted/20 px-4 py-3 text-sm">
+            {isLoadingViewingDoc ? (
+              <div className="flex items-center gap-2 text-muted-foreground">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                <span>Loading document text...</span>
+              </div>
+            ) : viewingDoc?.content_text ? (
+              <div className="max-w-none [&_pre]:my-2 [&_p]:my-2 [&_ul]:my-2 [&_ul]:list-disc [&_ul]:pl-5 [&_ol]:my-2 [&_ol]:list-decimal [&_ol]:pl-5 [&_h1]:text-lg [&_h1]:font-bold [&_h2]:text-base [&_h2]:font-bold [&_h3]:text-sm [&_h3]:font-semibold [&_strong]:font-semibold [&_blockquote]:border-l-2 [&_blockquote]:border-border [&_blockquote]:pl-3 [&_blockquote]:text-muted-foreground">
+                <MarkdownRenderer content={viewingDoc.content_text} />
+              </div>
+            ) : (
+              <p className="text-muted-foreground">No text content stored for this document.</p>
+            )}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setViewingDoc(null)}>Close</Button>
+            <Button onClick={handleCopyViewingDoc} disabled={isLoadingViewingDoc || !viewingDoc?.content_text}>
+              <Copy className="h-4 w-4 mr-2" />
+              Copy Text
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       {/* Add Text Dialog */}
       <Dialog open={addMode === "text"} onOpenChange={(open) => !open && handleCloseDialog()}>
-        <DialogContent className="sm:max-w-lg">
-          <DialogHeader>
+        <DialogContent className="sm:max-w-2xl max-h-[85vh] flex flex-col">
+          <DialogHeader className="shrink-0">
             <DialogTitle>Add Text Document</DialogTitle>
             <DialogDescription>
               Paste or type text content. It will be chunked and indexed for RAG.
             </DialogDescription>
           </DialogHeader>
-          <div className="grid gap-4 py-4">
+          <div className="grid gap-4 py-4 min-h-0 flex-1 overflow-y-auto pr-1">
             <div className="grid gap-2">
               <Label htmlFor="text-name">Name</Label>
               <Input
@@ -330,12 +411,12 @@ export default function KnowledgeDetailPage() {
                 value={textContent}
                 onChange={(e) => setTextContent(e.target.value)}
                 placeholder="Paste your text content here..."
-                rows={8}
-                className="resize-none font-mono text-xs"
+                rows={14}
+                className="min-h-72 resize-y font-mono text-xs"
               />
             </div>
           </div>
-          <DialogFooter>
+          <DialogFooter className="shrink-0 border-t border-border pt-4">
             <Button variant="outline" onClick={handleCloseDialog}>Cancel</Button>
             <Button
               onClick={handleAddText}
@@ -350,14 +431,14 @@ export default function KnowledgeDetailPage() {
 
       {/* Upload File Dialog */}
       <Dialog open={addMode === "file"} onOpenChange={(open) => !open && handleCloseDialog()}>
-        <DialogContent className="sm:max-w-md">
-          <DialogHeader>
+        <DialogContent className="sm:max-w-md max-h-[85vh] flex flex-col">
+          <DialogHeader className="shrink-0">
             <DialogTitle>Upload File</DialogTitle>
             <DialogDescription>
               Upload a PDF, DOCX, TXT, or Markdown file. Text will be extracted and indexed.
             </DialogDescription>
           </DialogHeader>
-          <div className="grid gap-4 py-4">
+          <div className="grid gap-4 py-4 min-h-0 flex-1 overflow-y-auto pr-1">
             <div className="grid gap-2">
               <Label htmlFor="file-input">File</Label>
               <input
@@ -384,7 +465,7 @@ export default function KnowledgeDetailPage() {
               </p>
             )}
           </div>
-          <DialogFooter>
+          <DialogFooter className="shrink-0 border-t border-border pt-4">
             <Button variant="outline" onClick={handleCloseDialog}>Cancel</Button>
             <Button
               onClick={handleAddFile}

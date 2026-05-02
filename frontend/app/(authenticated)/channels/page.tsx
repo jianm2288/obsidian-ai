@@ -1,11 +1,10 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { useCallback, useEffect, useState } from "react"
 import { useSession } from "next-auth/react"
-import { useRouter } from "next/navigation"
 import Link from "next/link"
 import { apiClient } from "@/lib/api-client"
-import type { WAChannel, Agent, CreateWAChannelRequest } from "@/types/playground"
+import type { WAChannel, Agent } from "@/types/playground"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -28,7 +27,8 @@ import { MessageCircle, Plus, Trash2, Settings2, Loader2, Wifi, WifiOff, QrCode 
 import { toast } from "sonner"
 import { useConfirm } from "@/hooks/use-confirm"
 
-function StatusBadge({ status }: { status: WAChannel["status"] }) {
+function StatusBadge({ status, routingEnabled }: { status: WAChannel["status"]; routingEnabled: boolean }) {
+  if (!routingEnabled) return <Badge variant="secondary">Paused</Badge>
   if (status === "connected") return <Badge className="bg-emerald-500/15 text-emerald-600 border-emerald-500/30">Connected</Badge>
   if (status === "pending_qr") return <Badge className="bg-amber-500/15 text-amber-600 border-amber-500/30">Scan QR</Badge>
   return <Badge variant="secondary">Disconnected</Badge>
@@ -36,7 +36,6 @@ function StatusBadge({ status }: { status: WAChannel["status"] }) {
 
 export default function ChannelsPage() {
   const { data: authSession } = useSession()
-  const router = useRouter()
   const [channels, setChannels] = useState<WAChannel[]>([])
   const [agents, setAgents] = useState<Agent[]>([])
   const [isLoading, setIsLoading] = useState(true)
@@ -44,6 +43,7 @@ export default function ChannelsPage() {
   const [createName, setCreateName] = useState("")
   const [createAgentId, setCreateAgentId] = useState("")
   const [createLoading, setCreateLoading] = useState(false)
+  const [busyChannelId, setBusyChannelId] = useState<string | null>(null)
 
   const [ConfirmDialog, confirmDelete] = useConfirm({
     title: "Delete channel",
@@ -52,13 +52,7 @@ export default function ChannelsPage() {
     variant: "destructive",
   })
 
-  useEffect(() => {
-    if (!authSession?.accessToken) return
-    apiClient.setAccessToken(authSession.accessToken as string)
-    load()
-  }, [authSession?.accessToken])
-
-  const load = async () => {
+  const load = useCallback(async () => {
     setIsLoading(true)
     try {
       const [chs, ags] = await Promise.all([
@@ -72,7 +66,16 @@ export default function ChannelsPage() {
     } finally {
       setIsLoading(false)
     }
-  }
+  }, [])
+
+  useEffect(() => {
+    if (!authSession?.accessToken) return
+    apiClient.setAccessToken(authSession.accessToken as string)
+    const timer = window.setTimeout(() => {
+      void load()
+    }, 0)
+    return () => window.clearTimeout(timer)
+  }, [authSession?.accessToken, load])
 
   const handleCreate = async () => {
     if (!createName.trim() || !createAgentId) return
@@ -100,6 +103,37 @@ export default function ChannelsPage() {
       toast.success("Channel deleted")
     } catch {
       toast.error("Failed to delete channel")
+    }
+  }
+
+  const handleResume = async (ch: WAChannel) => {
+    setBusyChannelId(String(ch.id))
+    try {
+      await apiClient.connectWAChannel(ch.id)
+      setChannels((prev) => prev.map((c) => (
+        c.id === ch.id ? { ...c, routing_enabled: true, status: "pending_qr" } : c
+      )))
+      toast.success("Channel resumed")
+      void load()
+    } catch {
+      toast.error("Failed to resume channel")
+    } finally {
+      setBusyChannelId(null)
+    }
+  }
+
+  const handlePause = async (ch: WAChannel) => {
+    setBusyChannelId(String(ch.id))
+    try {
+      await apiClient.disconnectWAChannel(ch.id)
+      setChannels((prev) => prev.map((c) => (
+        c.id === ch.id ? { ...c, routing_enabled: false, status: "disconnected" } : c
+      )))
+      toast.success("Channel paused")
+    } catch {
+      toast.error("Failed to pause channel")
+    } finally {
+      setBusyChannelId(null)
     }
   }
 
@@ -155,7 +189,7 @@ export default function ChannelsPage() {
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2">
                     <span className="text-sm font-medium truncate">{ch.name}</span>
-                    <StatusBadge status={ch.status} />
+                    <StatusBadge status={ch.status} routingEnabled={ch.routing_enabled} />
                   </div>
                   <div className="text-xs text-muted-foreground mt-0.5 flex items-center gap-2">
                     <span>Agent: {agentName(ch.agent_id)}</span>
@@ -168,13 +202,44 @@ export default function ChannelsPage() {
 
                 {/* Actions */}
                 <div className="flex items-center gap-1 shrink-0">
-                  {ch.status === "pending_qr" && (
+                  {ch.routing_enabled && ch.status === "pending_qr" && (
                     <Link href={`/channels/${ch.id}`}>
                       <Button variant="outline" size="sm" className="gap-1.5 h-7 text-xs">
                         <QrCode className="h-3 w-3" />
                         Scan QR
                       </Button>
                     </Link>
+                  )}
+                  {ch.routing_enabled ? (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="gap-1.5 h-7 text-xs"
+                      disabled={busyChannelId === String(ch.id)}
+                      onClick={() => handlePause(ch)}
+                    >
+                      {busyChannelId === String(ch.id) ? (
+                        <Loader2 className="h-3 w-3 animate-spin" />
+                      ) : (
+                        <WifiOff className="h-3 w-3" />
+                      )}
+                      Pause
+                    </Button>
+                  ) : (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="gap-1.5 h-7 text-xs"
+                      disabled={busyChannelId === String(ch.id)}
+                      onClick={() => handleResume(ch)}
+                    >
+                      {busyChannelId === String(ch.id) ? (
+                        <Loader2 className="h-3 w-3 animate-spin" />
+                      ) : (
+                        <Wifi className="h-3 w-3" />
+                      )}
+                      Resume
+                    </Button>
                   )}
                   <Link href={`/channels/${ch.id}`}>
                     <Button variant="ghost" size="icon" className="h-7 w-7">

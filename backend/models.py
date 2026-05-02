@@ -478,6 +478,7 @@ class WhatsAppChannel(Base):
     tts_backend            = Column(String, nullable=True)                    # "auto" | "qwen" | "classic"
     voice_clone_audio_path = Column(String, nullable=True)                    # path to stored reference .wav
     voice_clone_ref_text   = Column(Text, nullable=True)                      # transcript of reference audio
+    routing_enabled  = Column(Boolean, default=True, nullable=False)          # whether incoming WA messages should be processed
     is_active        = Column(Boolean, default=True, nullable=False)
     created_at       = Column(DateTime(timezone=True), server_default=func.now())
     updated_at       = Column(DateTime(timezone=True), onupdate=func.now())

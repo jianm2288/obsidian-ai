@@ -1,11 +1,30 @@
 "use client"
 
 import { useCallback, useState } from "react"
-import { Copy, Check, ThumbsUp, ThumbsDown, Bot, FileText, BookOpen, FileCode2, Loader2, Wrench } from "lucide-react"
+import { Copy, Check, ThumbsUp, ThumbsDown, Bot, FileText, BookOpen, FileCode2, Loader2, Wrench, Save } from "lucide-react"
 import { motion, AnimatePresence } from "motion/react"
 import { usePlaygroundStore } from "@/stores/playground-store"
-import { AppRoutes } from "@/app/api/routes"
 import { apiClient } from "@/lib/api-client"
+import { Button } from "@/components/ui/button"
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog"
+import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
+import { Textarea } from "@/components/ui/textarea"
+import { toast } from "sonner"
 import {
   Message,
   MessageContent,
@@ -23,7 +42,7 @@ import { Plan } from "@/components/ai-elements/plan"
 import { JsxPreview } from "@/components/ai-elements/jsx-preview"
 import { HITLApproval } from "@/components/ai-elements/hitl-approval"
 import { ToolProposalCard } from "@/components/ai-elements/tool-proposal-card"
-import type { Message as MessageType, ToolCall, ToolRound, FileNode, PlanData, HITLApprovalEvent, ToolProposalEvent } from "@/types/playground"
+import type { Message as MessageType, ToolCall, ToolRound, FileNode, PlanData, HITLApprovalEvent, ToolProposalEvent, KnowledgeBase } from "@/types/playground"
 
 /** Extract the first html/jsx/tsx fenced block from message content.
  *  Returns { preview, stripped } where stripped has the fence block removed. */
@@ -77,6 +96,26 @@ function stripArtifacts(content: string): { text: string; refs: ArtifactRef[] } 
     .replace(ARTIFACT_PATCH_RE, "")
     .trim()
   return { text, refs }
+}
+
+function plainTitleFromMessage(content: string, createdAt?: string) {
+  const firstLine = stripArtifacts(content).text
+    .split("\n")
+    .map((line) => line.replace(/^#+\s*/, "").replace(/[*_`]/g, "").trim())
+    .find(Boolean)
+
+  if (firstLine) return firstLine.slice(0, 90)
+
+  const stamp = createdAt ? new Date(createdAt) : new Date()
+  return `Chat note - ${stamp.toLocaleString()}`
+}
+
+function saveableMessageContent(content: string) {
+  return stripArtifacts(content).text || content.replace(MODEL_INTERNAL_TOKEN_RE, "").trim()
+}
+
+function errorMessage(err: unknown, fallback: string) {
+  return err instanceof Error ? err.message : fallback
 }
 
 /** Inline chip that opens the artifact in the side panel */
@@ -142,6 +181,13 @@ export function MessageBubble({
   const isUser = message.role === "user"
   const [copied, setCopied] = useState(false)
   const [feedback, setFeedback] = useState<"up" | "down" | null>(message.rating ?? null)
+  const [saveDialogOpen, setSaveDialogOpen] = useState(false)
+  const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBase[]>([])
+  const [selectedKbId, setSelectedKbId] = useState("")
+  const [saveTitle, setSaveTitle] = useState("")
+  const [saveContent, setSaveContent] = useState("")
+  const [isLoadingKbs, setIsLoadingKbs] = useState(false)
+  const [isSavingToKb, setIsSavingToKb] = useState(false)
   const mode = usePlaygroundStore((s) => s.mode)
   const agents = usePlaygroundStore((s) => s.agents)
 
@@ -158,6 +204,47 @@ export function MessageBubble({
       setTimeout(() => setCopied(false), 2000)
     }
   }, [message.content])
+
+  const openSaveDialog = useCallback(async () => {
+    if (!message.content) return
+    if (accessToken) apiClient.setAccessToken(accessToken)
+
+    setSaveTitle(plainTitleFromMessage(message.content, message.created_at))
+    setSaveContent(saveableMessageContent(message.content))
+    setSaveDialogOpen(true)
+    setIsLoadingKbs(true)
+
+    try {
+      const kbs = await apiClient.listKnowledgeBases()
+      setKnowledgeBases(kbs)
+      setSelectedKbId((current) => current || kbs[0]?.id || "")
+    } catch (err: unknown) {
+      toast.error(errorMessage(err, "Failed to load knowledge bases"))
+    } finally {
+      setIsLoadingKbs(false)
+    }
+  }, [accessToken, message.content, message.created_at])
+
+  const handleSaveToKb = useCallback(async () => {
+    if (!selectedKbId || !saveTitle.trim() || !saveContent.trim()) return
+    if (accessToken) apiClient.setAccessToken(accessToken)
+
+    setIsSavingToKb(true)
+    try {
+      await apiClient.addKBDocument(selectedKbId, {
+        doc_type: "text",
+        name: saveTitle.trim(),
+        content_text: saveContent.trim(),
+      })
+      const kbName = knowledgeBases.find((kb) => kb.id === selectedKbId)?.name ?? "KB"
+      toast.success(`Saved to ${kbName}`)
+      setSaveDialogOpen(false)
+    } catch (err: unknown) {
+      toast.error(errorMessage(err, "Failed to save to KB"))
+    } finally {
+      setIsSavingToKb(false)
+    }
+  }, [accessToken, knowledgeBases, saveContent, saveTitle, selectedKbId])
 
   const handleFeedback = useCallback(async (type: "up" | "down") => {
     const newRating = feedback === type ? null : type
@@ -385,6 +472,9 @@ export function MessageBubble({
               )}
             </AnimatePresence>
           </MessageAction>
+          <MessageAction tooltip="Save to KB" onClick={openSaveDialog}>
+            <Save className="size-3.5" />
+          </MessageAction>
           <MessageAction
             tooltip="Helpful"
             onClick={() => handleFeedback("up")}
@@ -416,6 +506,66 @@ export function MessageBubble({
           )}
         </div>
       )}
+
+      <Dialog open={saveDialogOpen} onOpenChange={setSaveDialogOpen}>
+        <DialogContent className="sm:max-w-2xl max-h-[85vh] flex flex-col">
+          <DialogHeader className="shrink-0">
+            <DialogTitle>Save to KB</DialogTitle>
+            <DialogDescription>
+              Save this assistant response as a text document.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-4 py-4 min-h-0 flex-1 overflow-y-auto pr-1">
+            <div className="grid gap-2">
+              <Label>Knowledge Base</Label>
+              <Select value={selectedKbId} onValueChange={setSelectedKbId} disabled={isLoadingKbs || isSavingToKb}>
+                <SelectTrigger className="w-full">
+                  <SelectValue placeholder={isLoadingKbs ? "Loading..." : "Select a knowledge base"} />
+                </SelectTrigger>
+                <SelectContent>
+                  {knowledgeBases.map((kb) => (
+                    <SelectItem key={kb.id} value={kb.id}>
+                      {kb.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="grid gap-2">
+              <Label htmlFor={`kb-note-title-${message.id}`}>Title</Label>
+              <Input
+                id={`kb-note-title-${message.id}`}
+                value={saveTitle}
+                onChange={(event) => setSaveTitle(event.target.value)}
+                disabled={isSavingToKb}
+              />
+            </div>
+            <div className="grid gap-2">
+              <Label htmlFor={`kb-note-content-${message.id}`}>Content</Label>
+              <Textarea
+                id={`kb-note-content-${message.id}`}
+                value={saveContent}
+                onChange={(event) => setSaveContent(event.target.value)}
+                rows={12}
+                className="min-h-64 resize-y font-mono text-xs"
+                disabled={isSavingToKb}
+              />
+            </div>
+          </div>
+          <DialogFooter className="shrink-0 border-t border-border pt-4">
+            <Button variant="outline" onClick={() => setSaveDialogOpen(false)} disabled={isSavingToKb}>
+              Cancel
+            </Button>
+            <Button
+              onClick={handleSaveToKb}
+              disabled={isLoadingKbs || isSavingToKb || !selectedKbId || !saveTitle.trim() || !saveContent.trim()}
+            >
+              {isSavingToKb && <Loader2 className="h-4 w-4 animate-spin mr-2" />}
+              Save to KB
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </Message>
   )
 }

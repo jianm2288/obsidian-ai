@@ -132,6 +132,19 @@ class OllamaProvider(BaseLLMProvider):
                         return
 
                     message = chunk.get("message", {})
+                    raw_tool_calls = message.get("tool_calls")
+                    if raw_tool_calls:
+                        for i, tc in enumerate(raw_tool_calls):
+                            function = tc.get("function", {})
+                            yield LLMStreamChunk(
+                                type="tool_call",
+                                tool_call=LLMToolCall(
+                                    id=tc.get("id", f"call_{i}"),
+                                    name=function.get("name", ""),
+                                    arguments=json.dumps(function.get("arguments", {})),
+                                ),
+                            )
+
                     content = message.get("content", "")
                     if not content:
                         continue

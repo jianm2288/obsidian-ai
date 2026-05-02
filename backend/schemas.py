@@ -692,6 +692,7 @@ class KBDocumentResponse(BaseModel):
     kb_id: str
     doc_type: str
     name: str
+    content_text: Optional[str] = None
     filename: Optional[str] = None
     media_type: Optional[str] = None
     indexed: bool

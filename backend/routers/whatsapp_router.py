@@ -78,6 +78,7 @@ def _channel_dict(ch) -> dict:
         "voice_clone_audio_path": getattr(ch, "voice_clone_audio_path", None),
         "voice_clone_ref_text": getattr(ch, "voice_clone_ref_text", None),
         "has_voice_clone": bool(getattr(ch, "voice_clone_audio_path", None)),
+        "routing_enabled": getattr(ch, "routing_enabled", True),
         "is_active": ch.is_active,
         "created_at": ch.created_at.isoformat() if ch.created_at else None,
         "updated_at": ch.updated_at.isoformat() if ch.updated_at else None,
@@ -102,6 +103,7 @@ def _serialize_mongo_channel(ch: dict) -> dict:
         "voice_clone_audio_path": ch.get("voice_clone_audio_path"),
         "voice_clone_ref_text": ch.get("voice_clone_ref_text"),
         "has_voice_clone": bool(ch.get("voice_clone_audio_path")),
+        "routing_enabled": ch.get("routing_enabled", True),
         "is_active": ch.get("is_active", True),
         "created_at": ch["created_at"].isoformat() if ch.get("created_at") else None,
         "updated_at": ch["updated_at"].isoformat() if ch.get("updated_at") else None,
@@ -173,6 +175,7 @@ async def create_channel(
             "agent_id": str(body.agent_id),
             "name": body.name,
             "status": "disconnected",
+            "routing_enabled": False,
         })
         return _serialize_mongo_channel(ch)
 
@@ -186,6 +189,7 @@ async def create_channel(
         agent_id=int(body.agent_id),
         name=body.name,
         auth_state_path=auth_path,
+        routing_enabled=False,
     )
     db.add(ch)
     db.commit()
@@ -338,17 +342,34 @@ async def connect_channel(
             raise HTTPException(404, "Channel not found")
         auth_path = ch.auth_state_path or f"wa_auth/{channel_id}"
 
+    # Enable routing before starting the sidecar so a fast "connected" callback is accepted.
+    if DATABASE_TYPE == "mongo":
+        await WhatsAppChannelCollection.update(
+            mongo_db,
+            str(channel_id),
+            str(current_user.user_id),
+            {"status": "pending_qr", "routing_enabled": True},
+        )
+    else:
+        ch.status = "pending_qr"
+        ch.routing_enabled = True
+        db.commit()
+
     try:
         result = await _call_sidecar("post", f"/channels/{channel_id}/start", json={"auth_path": auth_path})
     except httpx.HTTPError as e:
+        if DATABASE_TYPE == "mongo":
+            await WhatsAppChannelCollection.update(
+                mongo_db,
+                str(channel_id),
+                str(current_user.user_id),
+                {"status": "disconnected", "routing_enabled": False},
+            )
+        else:
+            ch.status = "disconnected"
+            ch.routing_enabled = False
+            db.commit()
         raise HTTPException(502, f"Sidecar error: {e}")
-
-    # Mark as pending_qr
-    if DATABASE_TYPE == "mongo":
-        await WhatsAppChannelCollection.update(mongo_db, str(channel_id), str(current_user.user_id), {"status": "pending_qr"})
-    else:
-        ch.status = "pending_qr"
-        db.commit()
 
     return {"status": "pending_qr", "message": "Scan the QR code at /wa/channels/{id}/qr"}
 
@@ -379,12 +400,57 @@ async def disconnect_channel(
         pass
 
     if DATABASE_TYPE == "mongo":
-        await WhatsAppChannelCollection.update(mongo_db, str(channel_id), str(current_user.user_id), {"status": "disconnected"})
+        await WhatsAppChannelCollection.update(
+            mongo_db,
+            str(channel_id),
+            str(current_user.user_id),
+            {"status": "disconnected", "routing_enabled": False},
+        )
     else:
         ch.status = "disconnected"
+        ch.routing_enabled = False
         db.commit()
 
     return {"status": "disconnected"}
+
+
+@router.get("/sidecar/autostart-channels")
+async def sidecar_autostart_channels(db: Session = Depends(get_db)):
+    """
+    Internal sidecar bootstrap list. Only channels the user explicitly resumed
+    should be started after a bridge restart.
+    """
+    if DATABASE_TYPE == "mongo":
+        mongo_db = get_database()
+        cursor = mongo_db["whatsapp_channels"].find({
+            "is_active": True,
+            "routing_enabled": True,
+            "status": {"$ne": "disconnected"},
+        })
+        return {
+            "channels": [
+                {
+                    "id": str(ch["_id"]),
+                    "auth_state_path": ch.get("auth_state_path") or f"wa_auth/{ch['_id']}",
+                }
+                async for ch in cursor
+            ]
+        }
+
+    channels = db.query(WhatsAppChannel).filter(
+        WhatsAppChannel.is_active == True,
+        WhatsAppChannel.routing_enabled == True,
+        WhatsAppChannel.status != "disconnected",
+    ).all()
+    return {
+        "channels": [
+            {
+                "id": ch.id,
+                "auth_state_path": ch.auth_state_path or f"wa_auth/{ch.id}",
+            }
+            for ch in channels
+        ]
+    }
 
 
 @router.get("/channels/{channel_id}/qr")
@@ -441,15 +507,18 @@ async def update_channel_status(
 
     if DATABASE_TYPE == "mongo":
         mongo_db = get_database()
+        collection = mongo_db["whatsapp_channels"]
+        from bson import ObjectId
+        current = await collection.find_one({"_id": ObjectId(str(channel_id))})
         updates: dict = {}
+        if status and current and not current.get("routing_enabled", True) and status != "disconnected":
+            status = None
         if status:
             updates["status"] = status
         if wa_phone:
             updates["wa_phone"] = wa_phone
         if updates:
             # Update without user_id constraint (sidecar call)
-            collection = mongo_db["whatsapp_channels"]
-            from bson import ObjectId
             updates["updated_at"] = datetime.now(timezone.utc)
             await collection.update_one({"_id": ObjectId(str(channel_id))}, {"$set": updates})
         return {"ok": True}
@@ -457,6 +526,8 @@ async def update_channel_status(
     ch = db.query(WhatsAppChannel).filter(WhatsAppChannel.id == int(channel_id)).first()
     if not ch:
         raise HTTPException(404, "Channel not found")
+    if status and not getattr(ch, "routing_enabled", True) and status != "disconnected":
+        status = None
     if status:
         ch.status = status
     if wa_phone:
@@ -751,5 +822,17 @@ async def incoming_message(body: WAIncomingMessage):
     No user auth — sidecar is localhost-only.
     """
     from services.whatsapp_service import handle_incoming_message
-    asyncio.ensure_future(handle_incoming_message(body.dict(), None))
+    if DATABASE_TYPE == "mongo":
+        asyncio.ensure_future(handle_incoming_message(body.dict(), None))
+    else:
+        from database import SessionLocal
+
+        async def _handle_with_db():
+            db = SessionLocal()
+            try:
+                await handle_incoming_message(body.dict(), db)
+            finally:
+                db.close()
+
+        asyncio.ensure_future(_handle_with_db())
     return {"status": "ok"}

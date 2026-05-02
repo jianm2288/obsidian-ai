@@ -54,6 +54,8 @@ const channels = new Map();
 const starting = new Set();
 /** Pending reconnect timers — prevents double-reconnect from multiple close events */
 const reconnectTimers = new Map();
+/** Channels deliberately paused through the UI should not auto-reconnect */
+const manualStops = new Set();
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -87,6 +89,7 @@ async function updateChannelStatus(channelId, status, waPhone = null) {
 
 async function startChannel(channelId, authPath) {
   const key = String(channelId);
+  manualStops.delete(key);
   if (starting.has(key)) return channels.get(key);
   if (channels.has(key)) return channels.get(key); // already running
   starting.add(key);
@@ -166,27 +169,38 @@ async function startChannel(channelId, authPath) {
 
     if (connection === "close") {
       const reason = new Boom(lastDisconnect?.error)?.output?.statusCode;
-      const shouldReconnect = reason !== DisconnectReason.loggedOut;
+      const key = String(channelId);
+      const manuallyStopped = manualStops.has(key);
+      const shouldReconnect = reason !== DisconnectReason.loggedOut && !manuallyStopped;
       _origStdoutWrite(`[WA-BRIDGE] connection closed channelId=${channelId} reason=${reason} shouldReconnect=${shouldReconnect} error=${lastDisconnect?.error?.message}\n`);
 
       logger.info({ channelId, reason, shouldReconnect }, "WhatsApp disconnected");
       entry.status = "disconnected";
 
+      if (channels.get(key) !== entry && !manuallyStopped) {
+        return;
+      }
+
       if (shouldReconnect) {
-        channels.delete(String(channelId));
+        channels.delete(key);
         // Cancel any pending reconnect before scheduling a new one
-        if (reconnectTimers.has(String(channelId))) {
-          clearTimeout(reconnectTimers.get(String(channelId)));
+        if (reconnectTimers.has(key)) {
+          clearTimeout(reconnectTimers.get(key));
         }
-        reconnectTimers.set(String(channelId), setTimeout(() => {
-          reconnectTimers.delete(String(channelId));
-          startChannel(channelId, dir);
+        reconnectTimers.set(key, setTimeout(() => {
+          reconnectTimers.delete(key);
+          if (!manualStops.has(key) && !channels.has(key)) {
+            startChannel(channelId, dir);
+          }
         }, 500));
       } else {
         await updateChannelStatus(channelId, "disconnected");
-        // Logged out — remove auth state
-        channels.delete(String(channelId));
-        fs.rmSync(dir, { recursive: true, force: true });
+        channels.delete(key);
+        if (reason === DisconnectReason.loggedOut) {
+          // Logged out — remove auth state
+          manualStops.delete(key);
+          fs.rmSync(dir, { recursive: true, force: true });
+        }
       }
     }
   });
@@ -504,12 +518,18 @@ async function startChannel(channelId, authPath) {
 }
 
 function stopChannel(channelId) {
-  const entry = channels.get(String(channelId));
+  const key = String(channelId);
+  manualStops.add(key);
+  if (reconnectTimers.has(key)) {
+    clearTimeout(reconnectTimers.get(key));
+    reconnectTimers.delete(key);
+  }
+  const entry = channels.get(key);
   if (!entry) return;
   try {
     entry.socket.end(undefined);
   } catch (_) {}
-  channels.delete(String(channelId));
+  channels.delete(key);
 }
 
 // ── Express app ───────────────────────────────────────────────────────────────
@@ -725,13 +745,13 @@ app.listen(PORT, async () => {
   logger.info(`Forwarding to FastAPI at ${FASTAPI_URL}`);
   ensureDir(AUTH_BASE_DIR);
 
-  // Auto-reconnect channels that have saved auth state
+  // Auto-reconnect only channels the backend says are resumed.
   try {
-    const entries = fs.readdirSync(AUTH_BASE_DIR, { withFileTypes: true });
-    for (const entry of entries) {
-      if (!entry.isDirectory()) continue;
-      const channelId = entry.name;
-      const dir = path.join(AUTH_BASE_DIR, channelId);
+    const { data } = await axios.get(`${FASTAPI_URL}/wa/sidecar/autostart-channels`, { headers: SIDECAR_HEADERS });
+    const autostartChannels = Array.isArray(data?.channels) ? data.channels : [];
+    for (const channel of autostartChannels) {
+      const channelId = String(channel.id);
+      const dir = channel.auth_state_path || authDir(channelId);
       // Only reconnect if creds.json exists (i.e. was previously authenticated)
       if (!fs.existsSync(path.join(dir, "creds.json"))) continue;
       // Reset status to disconnected first — backend may show stale "connected" from a previous run
@@ -742,6 +762,6 @@ app.listen(PORT, async () => {
       );
     }
   } catch (err) {
-    logger.warn({ err }, "Failed to scan auth dir for auto-reconnect");
+    logger.warn({ err }, "Failed to load WhatsApp autostart channels");
   }
 });

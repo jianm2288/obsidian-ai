@@ -28,6 +28,20 @@ export function ModelSelector() {
     return parts[parts.length - 1]
   }
 
+  const getDefaultModelForProvider = (provider: typeof providers[number]) => {
+    if (provider.model_id) return provider.model_id
+
+    const name = provider.name.toLowerCase()
+    const baseUrl = (provider.base_url || "").toLowerCase()
+
+    if (provider.provider_type === "ollama") return provider.name
+    if (name.includes("deepseek") || baseUrl.includes("deepseek")) return "deepseek-v4-pro"
+    if (provider.provider_type === "anthropic") return "claude-sonnet-4-6"
+    if (provider.provider_type === "google") return "gemini-2.0-flash"
+    if (provider.provider_type === "openrouter") return "openai/gpt-4o"
+    return "gpt-4o"
+  }
+
   // --- Team mode: show team agents and their models (read-only) ---
   if (mode === "team") {
     const selectedTeam = selectedTeamId
@@ -98,9 +112,12 @@ export function ModelSelector() {
 
   const handleSelectProvider = async (providerId: string) => {
     if (!selectedAgent || providerId === selectedAgent.provider_id) return
+    const provider = providers.find((p) => p.id === providerId)
+    if (!provider) return
     try {
       const updated = await apiClient.updateAgent(selectedAgent.id, {
         provider_id: providerId,
+        model_id: getDefaultModelForProvider(provider),
       })
       setAgents(agents.map((a) => (a.id === updated.id ? updated : a)))
     } catch (err) {
@@ -135,7 +152,7 @@ export function ModelSelector() {
           >
             <span className="text-xs font-medium">{provider.name}</span>
             <span className="text-[10px] text-muted-foreground font-mono">
-              {provider.provider_type}
+              {provider.provider_type} · {getModelLabel(getDefaultModelForProvider(provider))}
             </span>
           </DropdownMenuItem>
         ))}

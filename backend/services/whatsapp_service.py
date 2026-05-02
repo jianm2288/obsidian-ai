@@ -156,7 +156,12 @@ async def _resolve_session_mongo(payload: dict, mongo_db) -> tuple[str | None, s
     wa_group_name = payload.get("wa_group_name")
 
     channel = await WhatsAppChannelCollection.find_by_id(mongo_db, channel_id)
-    if not channel or not channel.get("is_active") or channel.get("status") == "disconnected":
+    if (
+        not channel
+        or not channel.get("is_active")
+        or not channel.get("routing_enabled", True)
+        or channel.get("status") == "disconnected"
+    ):
         return None, wa_chat_id, None
 
     # Whitelist check
@@ -477,7 +482,7 @@ async def _handle_sqlite(payload: dict, db) -> None:
         WhatsAppChannel.id == channel_id,
         WhatsAppChannel.is_active == True,
     ).first()
-    if not channel or channel.status == "disconnected":
+    if not channel or not getattr(channel, "routing_enabled", True) or channel.status == "disconnected":
         return
 
     if channel.allowed_jids:

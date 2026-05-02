@@ -17,3 +17,5 @@ cred*
 app-state*
 channel*
 uploads/*
+backend/uploads/
+backend/rag_indexes/

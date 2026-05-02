@@ -211,6 +211,7 @@ export interface KBDocument {
   kb_id: string
   doc_type: "text" | "file"
   name: string
+  content_text?: string
   filename?: string
   media_type?: string
   indexed: boolean
@@ -845,6 +846,7 @@ export interface WAChannel {
   voice_clone_audio_path: string | null
   voice_clone_ref_text: string | null
   has_voice_clone: boolean
+  routing_enabled: boolean
   is_active: boolean
   created_at: string | null
   updated_at: string | null

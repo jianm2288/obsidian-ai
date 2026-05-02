@@ -533,11 +533,14 @@ async def _run_workflow_sqlite(workflow_id, data, current_user, db):
     # Resolve agent names for step results
     step_results = []
     for s in sorted_steps:
-        agent = db.query(Agent).filter(Agent.id == int(s["agent_id"])).first()
+        node_type = s.get("node_type", "agent")
+        agent = None
+        if node_type == "agent" and s.get("agent_id"):
+            agent = db.query(Agent).filter(Agent.id == int(s["agent_id"])).first()
         step_results.append({
             "order": s["order"],
             "agent_id": s["agent_id"],
-            "agent_name": agent.name if agent else "Unknown",
+            "agent_name": agent.name if agent else node_type.capitalize(),
             "task": s["task"],
             "status": "pending",
         })

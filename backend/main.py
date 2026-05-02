@@ -692,6 +692,7 @@ def _run_sqlite_migrations(engine):
             "ALTER TABLE whatsapp_channels ADD COLUMN tts_backend TEXT",
             "ALTER TABLE whatsapp_channels ADD COLUMN voice_clone_audio_path TEXT",
             "ALTER TABLE whatsapp_channels ADD COLUMN voice_clone_ref_text TEXT",
+            "ALTER TABLE whatsapp_channels ADD COLUMN routing_enabled BOOLEAN NOT NULL DEFAULT 1",
         ]:
             try:
                 conn.execute(sqlalchemy.text(col_sql))

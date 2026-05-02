@@ -29,7 +29,8 @@ def _get_faiss_model():
     global _faiss_model
     if _faiss_model is None:
         from sentence_transformers import SentenceTransformer
-        _faiss_model = SentenceTransformer("all-MiniLM-L6-v2")
+        device = os.environ.get("RAG_EMBEDDING_DEVICE", "cpu")
+        _faiss_model = SentenceTransformer("all-MiniLM-L6-v2", device=device)
     return _faiss_model
 
 

@@ -54,12 +54,15 @@ async def run_scheduled_workflow_sqlite(schedule_id: int):
         # Build initial step_results list
         step_results = []
         for i, s in enumerate(sorted_steps):
-            agent_rec = db.query(Agent).filter(Agent.id == int(s["agent_id"])).first()
+            node_type = s.get("node_type", "agent")
+            agent_rec = None
+            if node_type == "agent" and s.get("agent_id"):
+                agent_rec = db.query(Agent).filter(Agent.id == int(s["agent_id"])).first()
             step_results.append({
                 "node_id": s.get("id"),
                 "order": s.get("order", i + 1),
                 "agent_id": s["agent_id"],
-                "agent_name": agent_rec.name if agent_rec else "Unknown",
+                "agent_name": agent_rec.name if agent_rec else node_type.capitalize(),
                 "task": s["task"],
                 "status": "pending",
             })

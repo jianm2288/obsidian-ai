@@ -1408,6 +1408,7 @@ class WhatsAppChannelCollection:
         collection = db[cls.collection_name]
         data.setdefault("is_active", True)
         data.setdefault("status", "disconnected")
+        data.setdefault("routing_enabled", False)
         data.setdefault("created_at", datetime.utcnow())
         result = await collection.insert_one(data)
         data["_id"] = result.inserted_id
