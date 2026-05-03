@@ -18,6 +18,38 @@ logger = logging.getLogger(__name__)
 
 DATABASE_TYPE = os.getenv("DATABASE_TYPE", "sqlite")
 MCP_CONNECT_TIMEOUT_SECONDS = 20
+_READ_ONLY_VAULT_SERVER_NAMES = {"obsidian_ultrasound_kb", "wiki_ultrasound_kb", "llm_wiki_hub"}
+_READ_ONLY_VAULT_TOOLS = {
+    "read_note",
+    "list_directory",
+    "search_notes",
+    "read_multiple_notes",
+    "get_notes_info",
+    "get_frontmatter",
+    "get_vault_stats",
+    "list_all_tags",
+}
+
+
+def _agent_uses_read_only_vaults(agent, server_name: str) -> bool:
+    if isinstance(agent, dict):
+        return agent.get("name") == "Deep Analyst" and server_name in _READ_ONLY_VAULT_SERVER_NAMES
+    return getattr(agent, "name", None) == "Deep Analyst" and server_name in _READ_ONLY_VAULT_SERVER_NAMES
+
+
+def _apply_mcp_tool_filter(conn, config: dict) -> None:
+    allowed_tools = set(config.get("allowed_mcp_tools") or [])
+    if not allowed_tools:
+        return
+    conn.tools = [
+        tool for tool in conn.tools
+        if tool.get("function", {}).get("name", "").split("__")[-1] in allowed_tools
+    ]
+    conn.tool_names = {
+        tool.get("function", {}).get("name", "")
+        for tool in conn.tools
+        if tool.get("function", {}).get("name")
+    }
 
 
 def _brief_exception(exc: BaseException) -> str:
@@ -183,7 +215,11 @@ async def run_scheduled_workflow_sqlite(schedule_id: int):
                     server_ids = json.loads(agent.mcp_servers_json)
                     if server_ids:
                         servers = db.query(MCPServer).filter(MCPServer.id.in_(server_ids), MCPServer.is_active == True).all()
-                        mcp_configs = [{"id": str(s.id), "name": s.name, "transport_type": s.transport_type, "command": s.command, "args_json": s.args_json, "env_json": s.env_json, "url": s.url, "headers_json": s.headers_json} for s in servers]
+                        for s in servers:
+                            config = {"id": str(s.id), "name": s.name, "transport_type": s.transport_type, "command": s.command, "args_json": s.args_json, "env_json": s.env_json, "url": s.url, "headers_json": s.headers_json}
+                            if _agent_uses_read_only_vaults(agent, s.name):
+                                config["allowed_mcp_tools"] = _READ_ONLY_VAULT_TOOLS
+                            mcp_configs.append(config)
                 except Exception:
                     pass
 
@@ -372,7 +408,11 @@ async def _run_scheduled_dag_sqlite(schedule, workflow, steps, step_results_list
                 server_ids = json.loads(agent.mcp_servers_json)
                 if server_ids:
                     servers = db.query(MCPServer).filter(MCPServer.id.in_(server_ids), MCPServer.is_active == True).all()
-                    mcp_configs = [{"id": str(srv.id), "name": srv.name, "transport_type": srv.transport_type, "command": srv.command, "args_json": srv.args_json, "env_json": srv.env_json, "url": srv.url, "headers_json": srv.headers_json} for srv in servers]
+                    for srv in servers:
+                        config = {"id": str(srv.id), "name": srv.name, "transport_type": srv.transport_type, "command": srv.command, "args_json": srv.args_json, "env_json": srv.env_json, "url": srv.url, "headers_json": srv.headers_json}
+                        if _agent_uses_read_only_vaults(agent, srv.name):
+                            config["allowed_mcp_tools"] = _READ_ONLY_VAULT_TOOLS
+                        mcp_configs.append(config)
             except Exception:
                 pass
 
@@ -462,6 +502,7 @@ async def _chat_non_streaming(llm, messages, system_prompt, tools, mcp_configs, 
                         stack.enter_async_context(connect_mcp_server(config)),
                         timeout=MCP_CONNECT_TIMEOUT_SECONDS,
                     )
+                    _apply_mcp_tool_filter(conn, config)
                     mcp_connections[conn.server_name] = conn
                     all_mcp_tools.extend(conn.tools)
                 except BaseException as e:
@@ -485,11 +526,14 @@ async def _chat_non_streaming(llm, messages, system_prompt, tools, mcp_configs, 
                         server_name, orig_name = parsed
                         conn = mcp_connections.get(server_name)
                         if conn:
-                            try:
-                                args = json.loads(tc.arguments) if tc.arguments else {}
-                            except Exception:
-                                args = {}
-                            result = await conn.call_tool(orig_name, args)
+                            if tc.name not in conn.tool_names:
+                                result = json.dumps({"error": f"MCP tool '{tc.name}' is not allowed for this agent"})
+                            else:
+                                try:
+                                    args = json.loads(tc.arguments) if tc.arguments else {}
+                                except Exception:
+                                    args = {}
+                                result = await conn.call_tool(orig_name, args)
                         else:
                             result = json.dumps({"error": f"MCP server '{server_name}' not connected"})
                     elif is_builtin_tool(tc.name):
@@ -705,6 +749,8 @@ async def run_scheduled_workflow_mongo(schedule_id: str):
                         server = await MCPServerCollection.find_by_id(mongo_db, str(sid))
                         if server and server.get("is_active", True):
                             server["id"] = str(server["_id"])
+                            if _agent_uses_read_only_vaults(agent, server.get("name", "")):
+                                server["allowed_mcp_tools"] = _READ_ONLY_VAULT_TOOLS
                             mcp_configs.append(server)
                 except Exception:
                     pass
@@ -815,6 +861,8 @@ async def _chat_non_streaming_mongo(llm, messages, system_prompt, tools, mcp_con
             server_name, orig_name = parsed
             conn = mcp_connections.get(server_name)
             if conn:
+                if tc_name not in conn.tool_names:
+                    return json.dumps({"error": f"MCP tool '{tc_name}' is not allowed for this agent"})
                 try:
                     args = json.loads(tc_arguments) if tc_arguments else {}
                 except Exception:
@@ -872,6 +920,7 @@ async def _chat_non_streaming_mongo(llm, messages, system_prompt, tools, mcp_con
                     stack.enter_async_context(connect_mcp_server(config)),
                     timeout=MCP_CONNECT_TIMEOUT_SECONDS,
                 )
+                _apply_mcp_tool_filter(conn, config)
                 mcp_connections[conn.server_name] = conn
                 if tools is None:
                     tools = []

@@ -10,7 +10,7 @@ from sse_starlette.sse import EventSourceResponse
 
 from config import DATABASE_TYPE
 from database import get_db
-from models import Workflow, WorkflowRun, Agent, LLMProvider, ToolDefinition, MCPServer, Session as SessionModel
+from models import Workflow, WorkflowRun, Agent, LLMProvider, ToolDefinition, MCPServer, Session as SessionModel, Message
 from schemas import (
     WorkflowRunRequest, WorkflowRunResponse, WorkflowRunListResponse,
     WorkflowStepResult,
@@ -22,6 +22,8 @@ from llm.provider_factory import create_provider_from_config
 from mcp_client import connect_mcp_server, parse_mcp_tool_name, MCPConnection
 from workflow_autosave import auto_save_workflow_output_sqlite
 from builtin_tools import BUILTIN_TOOL_SCHEMAS, execute_builtin_tool, is_builtin_tool
+from file_storage import FileStorageService
+from rag_service import RAGService
 
 if DATABASE_TYPE == "mongo":
     from database_mongo import get_database
@@ -42,6 +44,8 @@ TOOL_RESULT_PROMPT = (
     "Use this information to answer the user's question."
 )
 
+MAX_WORKFLOW_ATTACHMENT_CHARS = 120_000
+
 
 # ---------------------------------------------------------------------------
 # Shared helpers (reused from chat_router patterns)
@@ -57,6 +61,79 @@ def _create_llm(provider_record, agent_model_id: str | None = None):
         model_id=agent_model_id or provider_record.model_id or "gpt-4o",
         config=config,
     )
+
+
+def _with_runtime_context(system_prompt: str | None) -> str:
+    today = datetime.now().astimezone().strftime("%Y-%m-%d")
+    runtime_context = (
+        "\n\n<runtime_context>\n"
+        f"Current date: {today}\n"
+        "Use this current date for generated report dates unless the user provides a different explicit report date. "
+        "Do not invent report generation dates.\n"
+        "</runtime_context>\n"
+    )
+    return (system_prompt or "") + runtime_context
+
+
+def _workflow_input_with_attachments(input_text: str, attachments) -> str:
+    if not attachments:
+        return input_text
+
+    sections: list[str] = []
+    remaining_chars = MAX_WORKFLOW_ATTACHMENT_CHARS
+    for att in attachments:
+        if not getattr(att, "data", None):
+            continue
+        try:
+            file_bytes, media_type = FileStorageService.decode_data_uri(att.data)
+            media_type = getattr(att, "media_type", None) or media_type
+            text = RAGService.extract_text(file_bytes, att.filename, media_type)
+        except Exception as exc:
+            logger.warning("Failed to extract workflow attachment %s: %s", getattr(att, "filename", "file"), exc)
+            sections.append(
+                f"### {getattr(att, 'filename', 'attached file')}\n"
+                f"[Attachment could not be read: {exc}]"
+            )
+            continue
+
+        text = text.strip()
+        if not text:
+            sections.append(
+                f"### {att.filename}\n"
+                "[No readable text could be extracted from this attachment.]"
+            )
+            continue
+
+        if remaining_chars <= 0:
+            sections.append(f"### {att.filename}\n[Attachment omitted because earlier files reached the text limit.]")
+            continue
+
+        clipped = text[:remaining_chars]
+        remaining_chars -= len(clipped)
+        if len(clipped) < len(text):
+            clipped += "\n\n[Attachment text truncated.]"
+        sections.append(f"### {att.filename}\n{clipped}")
+
+    if not sections:
+        return input_text
+    return (
+        f"{input_text.rstrip()}\n\n"
+        "Attached background file text:\n"
+        + "\n\n".join(sections)
+    ).strip()
+
+
+def _add_workflow_session_message_sqlite(db, session_id: int | None, role: str, content: str, agent_id: int | None = None, metadata: dict | None = None):
+    if not session_id or not content:
+        return
+    db.add(Message(
+        session_id=session_id,
+        role=role,
+        content=content,
+        agent_id=agent_id,
+        metadata_json=json.dumps(metadata) if metadata else None,
+    ))
+    db.commit()
 
 
 def _create_llm_mongo(provider_record, agent_model_id: str | None = None):
@@ -233,7 +310,13 @@ def _load_mcp_configs(agent, db):
     if not server_ids:
         return []
     servers = db.query(MCPServer).filter(MCPServer.id.in_(server_ids), MCPServer.is_active == True).all()
-    return [{"id": str(s.id), "name": s.name, "transport_type": s.transport_type, "command": s.command, "args_json": s.args_json, "env_json": s.env_json, "url": s.url, "headers_json": s.headers_json} for s in servers]
+    configs = []
+    for s in servers:
+        config = {"id": str(s.id), "name": s.name, "transport_type": s.transport_type, "command": s.command, "args_json": s.args_json, "env_json": s.env_json, "url": s.url, "headers_json": s.headers_json}
+        if _agent_uses_read_only_vaults(agent, s.name):
+            config["allowed_mcp_tools"] = _READ_ONLY_VAULT_TOOLS
+        configs.append(config)
+    return configs
 
 
 async def _load_mcp_configs_mongo(agent, mongo_db):
@@ -256,6 +339,8 @@ async def _load_mcp_configs_mongo(agent, mongo_db):
         server = await MCPServerCollection.find_by_id(mongo_db, str(sid))
         if server and server.get("is_active", True):
             server["id"] = str(server["_id"])
+            if _agent_dict_uses_read_only_vaults(agent, server.get("name")):
+                server["allowed_mcp_tools"] = _READ_ONLY_VAULT_TOOLS
             configs.append(server)
     return configs
 
@@ -264,6 +349,27 @@ def _merge_tools(native_tools, mcp_tools):
     all_tools = list(native_tools or [])
     all_tools.extend(mcp_tools)
     return all_tools if all_tools else None
+
+
+_READ_ONLY_VAULT_SERVER_NAMES = {"obsidian_ultrasound_kb", "wiki_ultrasound_kb", "llm_wiki_hub"}
+_READ_ONLY_VAULT_TOOLS = {
+    "read_note",
+    "list_directory",
+    "search_notes",
+    "read_multiple_notes",
+    "get_notes_info",
+    "get_frontmatter",
+    "get_vault_stats",
+    "list_all_tags",
+}
+
+
+def _agent_uses_read_only_vaults(agent, server_name: str) -> bool:
+    return getattr(agent, "name", None) == "Deep Analyst" and server_name in _READ_ONLY_VAULT_SERVER_NAMES
+
+
+def _agent_dict_uses_read_only_vaults(agent: dict, server_name: str | None) -> bool:
+    return agent.get("name") == "Deep Analyst" and server_name in _READ_ONLY_VAULT_SERVER_NAMES
 
 
 async def _connect_mcp_servers(stack, mcp_server_configs):
@@ -275,6 +381,17 @@ async def _connect_mcp_servers(stack, mcp_server_configs):
                 stack.enter_async_context(connect_mcp_server(config)),
                 timeout=MCP_CONNECT_TIMEOUT_SECONDS,
             )
+            allowed_tools = set(config.get("allowed_mcp_tools") or [])
+            if allowed_tools:
+                conn.tools = [
+                    tool for tool in conn.tools
+                    if tool.get("function", {}).get("name", "").split("__")[-1] in allowed_tools
+                ]
+                conn.tool_names = {
+                    tool.get("function", {}).get("name", "")
+                    for tool in conn.tools
+                    if tool.get("function", {}).get("name")
+                }
             mcp_connections[conn.server_name] = conn
             all_mcp_tools.extend(conn.tools)
         except BaseException as e:
@@ -388,6 +505,8 @@ async def _execute_mcp_or_native(tc_name, tc_arguments, mcp_connections, db):
         server_name, original_tool_name = parsed
         conn = mcp_connections.get(server_name)
         if conn:
+            if tc_name not in conn.tool_names:
+                return json.dumps({"error": f"MCP tool '{original_tool_name}' is not allowed for this agent"})
             try:
                 args = json.loads(tc_arguments) if tc_arguments else {}
             except json.JSONDecodeError:
@@ -405,6 +524,8 @@ async def _execute_mcp_or_native_mongo(tc_name, tc_arguments, mcp_connections, m
         server_name, original_tool_name = parsed
         conn = mcp_connections.get(server_name)
         if conn:
+            if tc_name not in conn.tool_names:
+                return json.dumps({"error": f"MCP tool '{original_tool_name}' is not allowed for this agent"})
             try:
                 args = json.loads(tc_arguments) if tc_arguments else {}
             except json.JSONDecodeError:
@@ -656,6 +777,7 @@ async def _run_workflow_sqlite(workflow_id, data, current_user, db):
     if not steps:
         raise HTTPException(status_code=400, detail="Workflow has no steps")
 
+    workflow_input = _workflow_input_with_attachments(data.input, data.attachments)
     sorted_steps = sorted(steps, key=lambda s: s.get("order", 0))
 
     # Resolve agent names for step results
@@ -674,7 +796,7 @@ async def _run_workflow_sqlite(workflow_id, data, current_user, db):
         })
 
     # Create a session record so the run appears in session history
-    input_preview = data.input[:80] + ("..." if len(data.input) > 80 else "")
+    input_preview = workflow_input[:80] + ("..." if len(workflow_input) > 80 else "")
     session_obj = SessionModel(
         user_id=int(current_user.user_id),
         title=f"{workflow.name} — {input_preview}",
@@ -684,6 +806,13 @@ async def _run_workflow_sqlite(workflow_id, data, current_user, db):
     db.add(session_obj)
     db.commit()
     db.refresh(session_obj)
+    _add_workflow_session_message_sqlite(
+        db,
+        session_obj.id,
+        "user",
+        workflow_input,
+        metadata={"workflow_id": str(workflow_id), "workflow_name": workflow.name, "message_type": "workflow_input"},
+    )
 
     # Create run record
     run = WorkflowRun(
@@ -693,7 +822,7 @@ async def _run_workflow_sqlite(workflow_id, data, current_user, db):
         status="running",
         current_step=0,
         steps_json=json.dumps(step_results),
-        input_text=data.input,
+        input_text=workflow_input,
     )
     db.add(run)
     db.commit()
@@ -701,10 +830,10 @@ async def _run_workflow_sqlite(workflow_id, data, current_user, db):
 
     if _is_dag_workflow(sorted_steps):
         return EventSourceResponse(
-            _execute_dag_sqlite(run, workflow, sorted_steps, data.input, db)
+            _execute_dag_sqlite(run, workflow, sorted_steps, workflow_input, db)
         )
     return EventSourceResponse(
-        _execute_workflow_sqlite(run, workflow, sorted_steps, step_results, data.input, db)
+        _execute_workflow_sqlite(run, workflow, sorted_steps, step_results, workflow_input, db)
     )
 
 
@@ -774,6 +903,7 @@ async def _execute_workflow_sqlite(run, workflow, sorted_steps, step_results, us
             llm = _create_llm(provider, agent.model_id)
             tools = _build_tools(agent, db)
             mcp_configs = _load_mcp_configs(agent, db)
+            agent_system_prompt = _with_runtime_context(agent.system_prompt)
 
             messages = [LLMMessage(
                 role="user",
@@ -796,7 +926,7 @@ async def _execute_workflow_sqlite(run, workflow, sorted_steps, step_results, us
                             for _round in range(MAX_TOOL_ROUNDS + 1):
                                 round_content = ""
                                 tool_calls_collected = []
-                                async for chunk in llm.chat_stream(messages, system_prompt=agent.system_prompt, tools=merged):
+                                async for chunk in llm.chat_stream(messages, system_prompt=agent_system_prompt, tools=merged):
                                     if chunk.type == "content":
                                         round_content += chunk.content
                                         yield {"event": "step_content_delta", "data": json.dumps({"step_order": step_order, "content": chunk.content})}
@@ -820,7 +950,7 @@ async def _execute_workflow_sqlite(run, workflow, sorted_steps, step_results, us
                         for _round in range(MAX_TOOL_ROUNDS + 1):
                             round_content = ""
                             tool_calls_collected = []
-                            async for chunk in llm.chat_stream(messages, system_prompt=agent.system_prompt, tools=tools):
+                            async for chunk in llm.chat_stream(messages, system_prompt=agent_system_prompt, tools=tools):
                                 if chunk.type == "content":
                                     round_content += chunk.content
                                     yield {"event": "step_content_delta", "data": json.dumps({"step_order": step_order, "content": chunk.content})}
@@ -845,9 +975,9 @@ async def _execute_workflow_sqlite(run, workflow, sorted_steps, step_results, us
                 else:
                     # Non-final steps: non-streaming with tool support
                     if mcp_configs:
-                        step_output = await _chat_with_tools_and_mcp(llm, messages, agent.system_prompt, tools, db, mcp_configs)
+                        step_output = await _chat_with_tools_and_mcp(llm, messages, agent_system_prompt, tools, db, mcp_configs)
                     else:
-                        step_output = await _chat_with_tools(llm, messages, agent.system_prompt, tools, db)
+                        step_output = await _chat_with_tools(llm, messages, agent_system_prompt, tools, db)
 
                 markdown_export = await _maybe_export_step_markdown(
                     step_def,
@@ -861,6 +991,20 @@ async def _execute_workflow_sqlite(run, workflow, sorted_steps, step_results, us
                 step_results[i]["output"] = step_output
                 step_results[i]["completed_at"] = datetime.now(timezone.utc).isoformat()
                 _update_run(db, run_id, {"steps_json": json.dumps(step_results)})
+                _add_workflow_session_message_sqlite(
+                    db,
+                    run.session_id,
+                    "assistant",
+                    step_output,
+                    agent.id,
+                    {
+                        "workflow_run_id": str(run_id),
+                        "workflow_name": workflow.name,
+                        "step_order": step_order,
+                        "agent_name": agent.name,
+                        "message_type": "workflow_step_output",
+                    },
+                )
 
                 yield {
                     "event": "step_complete",
@@ -1093,6 +1237,13 @@ async def _execute_dag_sqlite(run, workflow, steps, user_input, db):
             step_results_by_id[node_id]["output"] = start_out
             step_results_by_id[node_id]["started_at"] = datetime.now(timezone.utc).isoformat()
             step_results_by_id[node_id]["completed_at"] = datetime.now(timezone.utc).isoformat()
+            _add_workflow_session_message_sqlite(
+                db,
+                run.session_id,
+                "system",
+                start_out,
+                metadata={"workflow_run_id": str(run_id), "node_id": node_id, "node_type": "start", "message_type": "workflow_node_output"},
+            )
             await sse_queue.put({"event": "node_complete", "node_id": node_id,
                                  "agent_name": "Start", "output": start_out})
             return True
@@ -1106,6 +1257,13 @@ async def _execute_dag_sqlite(run, workflow, steps, user_input, db):
             step_results_by_id[node_id]["output"] = end_out
             step_results_by_id[node_id]["started_at"] = datetime.now(timezone.utc).isoformat()
             step_results_by_id[node_id]["completed_at"] = datetime.now(timezone.utc).isoformat()
+            _add_workflow_session_message_sqlite(
+                db,
+                run.session_id,
+                "system",
+                end_out,
+                metadata={"workflow_run_id": str(run_id), "node_id": node_id, "node_type": "end", "message_type": "workflow_node_output"},
+            )
             await sse_queue.put({"event": "node_complete", "node_id": node_id,
                                  "agent_name": "End", "output": end_out})
             return True
@@ -1134,6 +1292,13 @@ async def _execute_dag_sqlite(run, workflow, steps, user_input, db):
             step_results_by_id[node_id]["output"] = chosen
             step_results_by_id[node_id]["started_at"] = datetime.now(timezone.utc).isoformat()
             step_results_by_id[node_id]["completed_at"] = datetime.now(timezone.utc).isoformat()
+            _add_workflow_session_message_sqlite(
+                db,
+                run.session_id,
+                "system",
+                chosen,
+                metadata={"workflow_run_id": str(run_id), "node_id": node_id, "node_type": "condition", "message_type": "workflow_node_output"},
+            )
             await sse_queue.put({"event": "node_complete", "node_id": node_id,
                                  "agent_name": "Condition", "output": chosen})
             return True
@@ -1172,6 +1337,7 @@ async def _execute_dag_sqlite(run, workflow, steps, user_input, db):
         llm = _create_llm(provider, agent.model_id)
         tools = _build_tools(agent, db)
         mcp_configs = _load_mcp_configs(agent, db)
+        agent_system_prompt = _with_runtime_context(agent.system_prompt)
         messages = [LLMMessage(role="user", content=node_input)]
 
         try:
@@ -1186,7 +1352,7 @@ async def _execute_dag_sqlite(run, workflow, steps, user_input, db):
                     for _round in range(MAX_TOOL_ROUNDS + 1):
                         round_content = ""
                         tool_calls_collected = []
-                        async for chunk in llm.chat_stream(messages, system_prompt=agent.system_prompt, tools=merged):
+                        async for chunk in llm.chat_stream(messages, system_prompt=agent_system_prompt, tools=merged):
                             if chunk.type == "content":
                                 round_content += chunk.content
                                 await sse_queue.put({"event": "node_content_delta", "node_id": node_id, "content": chunk.content})
@@ -1210,7 +1376,7 @@ async def _execute_dag_sqlite(run, workflow, steps, user_input, db):
                 for _round in range(MAX_TOOL_ROUNDS + 1):
                     round_content = ""
                     tool_calls_collected = []
-                    async for chunk in llm.chat_stream(messages, system_prompt=agent.system_prompt, tools=tools):
+                    async for chunk in llm.chat_stream(messages, system_prompt=agent_system_prompt, tools=tools):
                         if chunk.type == "content":
                             round_content += chunk.content
                             await sse_queue.put({"event": "node_content_delta", "node_id": node_id, "content": chunk.content})
@@ -1237,6 +1403,20 @@ async def _execute_dag_sqlite(run, workflow, steps, user_input, db):
             step_results_by_id[node_id]["status"] = "completed"
             step_results_by_id[node_id]["output"] = full_content
             step_results_by_id[node_id]["completed_at"] = datetime.now(timezone.utc).isoformat()
+            _add_workflow_session_message_sqlite(
+                db,
+                run.session_id,
+                "assistant",
+                full_content,
+                agent.id,
+                {
+                    "workflow_run_id": str(run_id),
+                    "workflow_name": workflow.name,
+                    "node_id": node_id,
+                    "agent_name": agent.name,
+                    "message_type": "workflow_node_output",
+                },
+            )
             await sse_queue.put({"event": "node_complete", "node_id": node_id, "agent_name": agent.name, "output": full_content})
             return True
 
@@ -1278,6 +1458,9 @@ async def _execute_dag_sqlite(run, workflow, steps, user_input, db):
                 in_flight.add(nid)
                 node_status[nid] = "running"
                 tasks[nid] = asyncio.create_task(run_node(nid))
+
+            if ready:
+                await asyncio.sleep(0)
 
             # Drain SSE queue before waiting for tasks
             while not sse_queue.empty():
@@ -1420,7 +1603,8 @@ async def _run_workflow_mongo(workflow_id, data, current_user):
         })
 
     # Create a session record so the run appears in session history
-    input_preview = data.input[:80] + ("..." if len(data.input) > 80 else "")
+    workflow_input = _workflow_input_with_attachments(data.input, data.attachments)
+    input_preview = workflow_input[:80] + ("..." if len(workflow_input) > 80 else "")
     session_doc = await SessionCollection.create(mongo_db, {
         "user_id": current_user.user_id,
         "title": f"{workflow.get('name', 'Workflow')} — {input_preview}",
@@ -1433,11 +1617,11 @@ async def _run_workflow_mongo(workflow_id, data, current_user):
         "user_id": current_user.user_id,
         "session_id": str(session_doc["_id"]),
         "steps_json": json.dumps(step_results),
-        "input_text": data.input,
+        "input_text": workflow_input,
     })
 
     return EventSourceResponse(
-        _execute_workflow_mongo(run, workflow, sorted_steps, step_results, data.input, mongo_db)
+        _execute_workflow_mongo(run, workflow, sorted_steps, step_results, workflow_input, mongo_db)
     )
 
 
@@ -1604,6 +1788,7 @@ async def _execute_workflow_mongo(run, workflow, sorted_steps, step_results, use
             llm = _create_llm_mongo(provider, agent.get("model_id"))
             tools = await _build_tools_mongo(agent, mongo_db)
             mcp_configs = await _load_mcp_configs_mongo(agent, mongo_db)
+            agent_system_prompt = _with_runtime_context(agent.get("system_prompt"))
 
             messages = [LLMMessage(
                 role="user",
@@ -1623,7 +1808,7 @@ async def _execute_workflow_mongo(run, workflow, sorted_steps, step_results, use
                             for _round in range(MAX_TOOL_ROUNDS + 1):
                                 round_content = ""
                                 tool_calls_collected = []
-                                async for chunk in llm.chat_stream(messages, system_prompt=agent.get("system_prompt"), tools=merged):
+                                async for chunk in llm.chat_stream(messages, system_prompt=agent_system_prompt, tools=merged):
                                     if chunk.type == "content":
                                         round_content += chunk.content
                                         yield {"event": "step_content_delta", "data": json.dumps({"step_order": step_order, "content": chunk.content})}
@@ -1645,7 +1830,7 @@ async def _execute_workflow_mongo(run, workflow, sorted_steps, step_results, use
                         for _round in range(MAX_TOOL_ROUNDS + 1):
                             round_content = ""
                             tool_calls_collected = []
-                            async for chunk in llm.chat_stream(messages, system_prompt=agent.get("system_prompt"), tools=tools):
+                            async for chunk in llm.chat_stream(messages, system_prompt=agent_system_prompt, tools=tools):
                                 if chunk.type == "content":
                                     round_content += chunk.content
                                     yield {"event": "step_content_delta", "data": json.dumps({"step_order": step_order, "content": chunk.content})}
@@ -1669,9 +1854,9 @@ async def _execute_workflow_mongo(run, workflow, sorted_steps, step_results, use
                     step_output = full_content.strip() or _fallback_output_from_tool_results(tool_results)
                 else:
                     if mcp_configs:
-                        step_output = await _chat_with_tools_and_mcp_mongo(llm, messages, agent.get("system_prompt"), tools, mongo_db, mcp_configs)
+                        step_output = await _chat_with_tools_and_mcp_mongo(llm, messages, agent_system_prompt, tools, mongo_db, mcp_configs)
                     else:
-                        step_output = await _chat_with_tools_mongo(llm, messages, agent.get("system_prompt"), tools, mongo_db)
+                        step_output = await _chat_with_tools_mongo(llm, messages, agent_system_prompt, tools, mongo_db)
 
                 markdown_export = await _maybe_export_step_markdown(
                     step_def,

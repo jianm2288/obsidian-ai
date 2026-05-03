@@ -449,6 +449,7 @@ class WorkflowListResponse(BaseModel):
 
 class WorkflowRunRequest(BaseModel):
     input: str
+    attachments: Optional[list[FileAttachmentInfo]] = None
 
 class WorkflowStepResult(BaseModel):
     node_id: Optional[str] = None      # DAG node ID; None for legacy runs

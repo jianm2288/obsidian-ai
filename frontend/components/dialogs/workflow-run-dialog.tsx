@@ -30,9 +30,13 @@ import {
   SkipForward,
   ChevronDown,
   ChevronRight,
+  Paperclip,
+  Link2,
+  X,
 } from "lucide-react"
 import { MarkdownRenderer } from "@/components/playground/chat/markdown-renderer"
 import { cn } from "@/lib/utils"
+import type { FileAttachment } from "@/types/playground"
 
 interface WorkflowRunDialogProps {
   open: boolean
@@ -74,6 +78,25 @@ function getDefaultRunInput(workflow: Workflow): string {
   return ""
 }
 
+function readFileAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result || ""))
+    reader.onerror = () => reject(reader.error || new Error("Failed to read file"))
+    reader.readAsDataURL(file)
+  })
+}
+
+function mediaTypeForFile(file: File): string {
+  if (file.type) return file.type
+  const lower = file.name.toLowerCase()
+  if (lower.endsWith(".md") || lower.endsWith(".markdown")) return "text/markdown"
+  if (lower.endsWith(".txt")) return "text/plain"
+  if (lower.endsWith(".pdf")) return "application/pdf"
+  if (lower.endsWith(".docx")) return "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+  return "application/octet-stream"
+}
+
 export function WorkflowRunDialog({
   open,
   onOpenChange,
@@ -85,6 +108,7 @@ export function WorkflowRunDialog({
   const [isRunning, setIsRunning] = useState(false)
   const [expandedOutputs, setExpandedOutputs] = useState<Set<number | "final">>(new Set())
   const [activeStepIndex, setActiveStepIndex] = useState<number | undefined>(undefined)
+  const [activeStepIndexes, setActiveStepIndexes] = useState<Set<number>>(new Set())
   const [completedSteps, setCompletedSteps] = useState<number[]>([])
   const [stepOutputs, setStepOutputs] = useState<Record<number, string>>({})
   const [streamingStepOrder, setStreamingStepOrder] = useState<number | null>(null)
@@ -93,8 +117,13 @@ export function WorkflowRunDialog({
   const [status, setStatus] = useState<"idle" | "running" | "completed" | "failed">("idle")
   const abortRef = useRef<AbortController | null>(null)
   const outputRef = useRef<HTMLDivElement>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
   const [currentRunLabel] = useState(generateRunId)
   const [runInput, setRunInput] = useState<string | null>(null)
+  const [attachments, setAttachments] = useState<FileAttachment[]>([])
+  const [linkInput, setLinkInput] = useState("")
+  const [attachedLinks, setAttachedLinks] = useState<string[]>([])
+  const [attachmentError, setAttachmentError] = useState<string | null>(null)
 
   useEffect(() => {
     if (outputRef.current) {
@@ -117,6 +146,7 @@ export function WorkflowRunDialog({
   const resetState = () => {
     setIsRunning(false)
     setActiveStepIndex(undefined)
+    setActiveStepIndexes(new Set())
     setCompletedSteps([])
     setStepOutputs({})
     setStreamingStepOrder(null)
@@ -125,13 +155,61 @@ export function WorkflowRunDialog({
     setStatus("idle")
     setExpandedOutputs(new Set())
     setRunInput(null)
+    setAttachments([])
+    setAttachedLinks([])
+    setLinkInput("")
+    setAttachmentError(null)
+    if (fileInputRef.current) fileInputRef.current.value = ""
+  }
+
+  const handleAttachFiles = async (files: FileList | null) => {
+    if (!files || files.length === 0) return
+    setAttachmentError(null)
+    try {
+      const next = await Promise.all(
+        Array.from(files).map(async (file) => ({
+          filename: file.name,
+          media_type: mediaTypeForFile(file),
+          file_type: "document" as const,
+          data: await readFileAsDataUrl(file),
+        })),
+      )
+      setAttachments((prev) => [...prev, ...next])
+    } catch (err) {
+      setAttachmentError(err instanceof Error ? err.message : "Failed to attach file")
+    } finally {
+      if (fileInputRef.current) fileInputRef.current.value = ""
+    }
+  }
+
+  const handleAddLink = () => {
+    const value = linkInput.trim()
+    if (!value) return
+    setAttachedLinks((prev) => [...prev, value])
+    setLinkInput("")
+    setAttachmentError(null)
+  }
+
+  const workflowInputWithLinks = (input: string) => {
+    if (attachedLinks.length === 0) return input
+    return `${input.trim()}\n\nBackground file links:\n${attachedLinks.map((link) => `- ${link}`).join("\n")}`
+  }
+
+  const stepIndexByNodeId = (nodeId: string) => {
+    const sorted = [...(workflow?.steps ?? [])].sort((a, b) => a.order - b.order)
+    return sorted.findIndex((step) => step.id === nodeId)
+  }
+
+  const stepByNodeId = (nodeId: string) => {
+    const sorted = [...(workflow?.steps ?? [])].sort((a, b) => a.order - b.order)
+    return sorted.find((step) => step.id === nodeId)
   }
 
   const handleRun = async () => {
     if (!session?.accessToken || !workflow || isRunning) return
 
-    const workflowInput = (runInput ?? getDefaultRunInput(workflow)).trim()
-    if (!workflowInput) {
+    const workflowInput = workflowInputWithLinks(runInput ?? getDefaultRunInput(workflow)).trim()
+    if (!workflowInput && attachments.length === 0) {
       setError("Enter workflow input before running.")
       return
     }
@@ -158,6 +236,7 @@ export function WorkflowRunDialog({
           const sortedSteps = [...workflow.steps].sort((a, b) => a.order - b.order)
           const idx = sortedSteps.findIndex((s) => s.order === event.step_order)
           setActiveStepIndex(idx >= 0 ? idx : undefined)
+          setActiveStepIndexes(idx >= 0 ? new Set([idx]) : new Set())
           setStreamingStepOrder(event.step_order)
         },
         () => { /* no streaming content displayed */ },
@@ -166,13 +245,16 @@ export function WorkflowRunDialog({
           const idx = sortedSteps.findIndex((s) => s.order === event.step_order)
           if (idx >= 0) setCompletedSteps((prev) => [...prev, idx])
           setStepOutputs((prev) => ({ ...prev, [event.step_order]: event.output }))
+          setExpandedOutputs((prev) => new Set([...prev, event.step_order]))
           setActiveStepIndex(undefined)
+          setActiveStepIndexes(new Set())
           setStreamingStepOrder(null)
         },
         (stepOrder: number, errorMsg: string) => {
           const sortedSteps = [...workflow.steps].sort((a, b) => a.order - b.order)
           const idx = sortedSteps.findIndex((s) => s.order === stepOrder)
           if (idx >= 0) setActiveStepIndex(idx)
+          setActiveStepIndexes(idx >= 0 ? new Set([idx]) : new Set())
           setError(`Step ${stepOrder} failed: ${errorMsg}`)
           setStatus("failed")
         },
@@ -180,6 +262,7 @@ export function WorkflowRunDialog({
           setFinalOutput(event.final_output)
           setStatus("completed")
           setActiveStepIndex(undefined)
+          setActiveStepIndexes(new Set())
           setStreamingStepOrder(null)
           setExpandedOutputs((prev) => new Set([...prev, "final" as const]))
         },
@@ -188,6 +271,42 @@ export function WorkflowRunDialog({
           setStatus("failed")
         },
         controller.signal,
+        attachments,
+        (event) => {
+          const idx = stepIndexByNodeId(event.node_id)
+          const step = stepByNodeId(event.node_id)
+          setActiveStepIndex(idx >= 0 ? idx : undefined)
+          if (idx >= 0) {
+            setActiveStepIndexes((prev) => new Set([...prev, idx]))
+          }
+          setStreamingStepOrder(step?.order ?? null)
+        },
+        () => { /* no streaming content displayed */ },
+        (event) => {
+          const idx = stepIndexByNodeId(event.node_id)
+          const step = stepByNodeId(event.node_id)
+          if (idx >= 0) setCompletedSteps((prev) => prev.includes(idx) ? prev : [...prev, idx])
+          if (step) setStepOutputs((prev) => ({ ...prev, [step.order]: event.output }))
+          if (step) setExpandedOutputs((prev) => new Set([...prev, step.order]))
+          if (idx >= 0) {
+            setActiveStepIndexes((prev) => {
+              const next = new Set(prev)
+              next.delete(idx)
+              return next
+            })
+          }
+          setActiveStepIndex(undefined)
+          setStreamingStepOrder(null)
+        },
+        (event) => {
+          const idx = stepIndexByNodeId(event.node_id)
+          if (idx >= 0) setActiveStepIndex(idx)
+          if (idx >= 0) {
+            setActiveStepIndexes((prev) => new Set([...prev, idx]))
+          }
+          setError(`Node ${event.node_id} failed: ${event.error}`)
+          setStatus("failed")
+        },
       )
     } catch (err) {
       if ((err as Error).name !== "AbortError") {
@@ -203,6 +322,7 @@ export function WorkflowRunDialog({
   const handleStop = () => {
     abortRef.current?.abort()
     setIsRunning(false)
+    setActiveStepIndexes(new Set())
     setStatus("failed")
     setError("Cancelled by user")
   }
@@ -218,6 +338,7 @@ export function WorkflowRunDialog({
 
   const sortedSteps = [...workflow.steps].sort((a, b) => a.order - b.order)
   const effectiveRunInput = runInput ?? getDefaultRunInput(workflow)
+  const canRun = effectiveRunInput.trim().length > 0 || attachments.length > 0 || attachedLinks.length > 0
 
   const getStepName = (step: typeof sortedSteps[0]) => {
     if (step.node_type && step.node_type !== "agent") {
@@ -258,7 +379,7 @@ export function WorkflowRunDialog({
               {currentRunLabel}
             </span>
             {status === "idle" && (
-              <Button onClick={handleRun} disabled={isRunning || !effectiveRunInput.trim()} className="gap-2 h-8 px-4 text-xs font-mono">
+              <Button onClick={handleRun} disabled={isRunning || !canRun} className="gap-2 h-8 px-4 text-xs font-mono">
                 <Play className="h-3.5 w-3.5" />
                 RUN
               </Button>
@@ -295,7 +416,7 @@ export function WorkflowRunDialog({
               Pipeline · {sortedSteps.length} steps
             </p>
             {sortedSteps.map((step, i) => {
-              const isActive = activeStepIndex === i || streamingStepOrder === step.order
+              const isActive = activeStepIndex === i || activeStepIndexes.has(i) || streamingStepOrder === step.order
               const isDone = completedSteps.includes(i)
               const output = stepOutputs[step.order]
               const isSkipped = output === "skipped"
@@ -308,8 +429,8 @@ export function WorkflowRunDialog({
                   key={step.order}
                   className={cn(
                     "flex items-start gap-2.5 rounded-md px-2 py-2 transition-colors text-left",
-                    isActive && "bg-blue-500/8 border border-blue-500/20",
-                    isDone && !isActive && "opacity-60",
+                    isActive && "bg-green-500/10 border border-green-500/25",
+                    isDone && !isActive && "bg-green-500/5 border border-green-500/15",
                     isFailed && "bg-red-500/8 border border-red-500/20",
                   )}
                 >
@@ -317,7 +438,7 @@ export function WorkflowRunDialog({
                     {isFailed ? (
                       <XCircle className="h-3.5 w-3.5 text-red-400" />
                     ) : isActive ? (
-                      <Loader2 className="h-3.5 w-3.5 text-blue-400 animate-spin" />
+                      <Loader2 className="h-3.5 w-3.5 text-green-400 animate-spin" />
                     ) : isDone && isSkipped ? (
                       <SkipForward className="h-3.5 w-3.5 text-muted-foreground/40" />
                     ) : isDone ? (
@@ -349,37 +470,122 @@ export function WorkflowRunDialog({
           {/* Right: output / idle state */}
           <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
             {status === "idle" && (
-              <div className="flex-1 flex flex-col items-center justify-center gap-4 p-8 text-center">
-                <div className="h-14 w-14 rounded-2xl bg-emerald-500/10 flex items-center justify-center">
-                  <GitBranch className="h-7 w-7 text-emerald-500" />
-                </div>
-                <div>
-                  <p className="text-sm font-semibold text-foreground">Ready to run</p>
-                  <p className="text-xs text-muted-foreground mt-1 max-w-xs">
-                    Enter the request for this workflow, then run it.
-                  </p>
-                </div>
-                <Textarea
-                  value={effectiveRunInput}
-                  onChange={(event) => {
-                    setRunInput(event.target.value)
-                    if (error) setError(null)
-                  }}
-                  placeholder="Ultrasound volume imaging analysis..."
-                  className="w-full max-w-xl min-h-32 resize-none text-left"
-                />
-                {error && (
-                  <div className="rounded-md border border-red-500/20 bg-red-500/5 px-3 py-2 text-xs text-red-400">
-                    {error}
+              <div className="flex-1 min-h-0 overflow-y-auto p-5">
+                <div className="mx-auto flex min-h-full w-full max-w-5xl flex-col gap-3">
+                  <div className="flex items-center gap-3 text-left">
+                    <div className="h-10 w-10 rounded-xl bg-emerald-500/10 flex items-center justify-center shrink-0">
+                      <GitBranch className="h-5 w-5 text-emerald-500" />
+                    </div>
+                    <div>
+                      <p className="text-sm font-semibold text-foreground">Ready to run</p>
+                      <p className="text-xs text-muted-foreground mt-0.5">
+                        Enter the request for this workflow, then run it.
+                      </p>
+                    </div>
                   </div>
-                )}
-                <div className="flex items-center gap-2 text-[11px] text-muted-foreground/60 font-mono border border-border rounded-md px-3 py-1.5 bg-muted/20">
-                  Run ID: {currentRunLabel}
+                  <Textarea
+                    value={effectiveRunInput}
+                    onChange={(event) => {
+                      setRunInput(event.target.value)
+                      if (error) setError(null)
+                    }}
+                    placeholder="Ultrasound volume imaging analysis..."
+                    className="w-full min-h-[min(42vh,28rem)] max-h-[46vh] resize-y overflow-y-auto text-left font-mono text-xs leading-relaxed"
+                  />
+                  <div className="w-full space-y-2">
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      multiple
+                      accept=".txt,.md,.markdown,.pdf,.docx,text/plain,text/markdown,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                      className="hidden"
+                      onChange={(event) => void handleAttachFiles(event.target.files)}
+                    />
+                    <div className="flex flex-col gap-2 sm:flex-row">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="gap-2 shrink-0"
+                        onClick={() => fileInputRef.current?.click()}
+                      >
+                        <Paperclip className="h-3.5 w-3.5" />
+                        Attach File
+                      </Button>
+                      <div className="flex min-w-0 flex-1 items-center gap-2">
+                        <div className="relative flex-1">
+                          <Link2 className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+                          <input
+                            value={linkInput}
+                            onChange={(event) => setLinkInput(event.target.value)}
+                            onKeyDown={(event) => {
+                              if (event.key === "Enter") {
+                                event.preventDefault()
+                                handleAddLink()
+                              }
+                            }}
+                            placeholder="https://..."
+                            className="h-9 w-full rounded-md border border-input bg-transparent pl-8 pr-3 text-xs outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
+                          />
+                        </div>
+                        <Button type="button" variant="outline" size="sm" onClick={handleAddLink} disabled={!linkInput.trim()}>
+                          Add Link
+                        </Button>
+                      </div>
+                    </div>
+                    {(attachments.length > 0 || attachedLinks.length > 0) && (
+                      <div className="max-h-24 overflow-y-auto rounded-md border border-border/60 bg-muted/10 p-2">
+                        <div className="flex flex-wrap gap-2">
+                          {attachments.map((file, index) => (
+                            <Badge key={`${file.filename}-${index}`} variant="outline" className="gap-1.5 px-2 py-1 text-[11px]">
+                              <Paperclip className="h-3 w-3" />
+                              <span className="max-w-56 truncate">{file.filename}</span>
+                              <button
+                                type="button"
+                                onClick={() => setAttachments((prev) => prev.filter((_, i) => i !== index))}
+                                className="rounded-sm text-muted-foreground hover:text-foreground"
+                                aria-label={`Remove ${file.filename}`}
+                              >
+                                <X className="h-3 w-3" />
+                              </button>
+                            </Badge>
+                          ))}
+                          {attachedLinks.map((link, index) => (
+                            <Badge key={`${link}-${index}`} variant="outline" className="gap-1.5 px-2 py-1 text-[11px]">
+                              <Link2 className="h-3 w-3" />
+                              <span className="max-w-72 truncate">{link}</span>
+                              <button
+                                type="button"
+                                onClick={() => setAttachedLinks((prev) => prev.filter((_, i) => i !== index))}
+                                className="rounded-sm text-muted-foreground hover:text-foreground"
+                                aria-label={`Remove ${link}`}
+                              >
+                                <X className="h-3 w-3" />
+                              </button>
+                            </Badge>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                  {(error || attachmentError) && (
+                    <div className="rounded-md border border-red-500/20 bg-red-500/5 px-3 py-2 text-xs text-red-400">
+                      {error || attachmentError}
+                    </div>
+                  )}
+                  <div className="sticky bottom-0 -mx-5 mt-auto border-t border-border bg-background/95 px-5 py-3 backdrop-blur">
+                    <div className="mx-auto flex max-w-5xl items-center justify-between gap-3">
+                      <div className="flex min-w-0 items-center gap-2 text-[11px] text-muted-foreground/60 font-mono border border-border rounded-md px-3 py-1.5 bg-muted/20">
+                        <span className="shrink-0">Run ID:</span>
+                        <span className="truncate">{currentRunLabel}</span>
+                      </div>
+                      <Button onClick={handleRun} disabled={isRunning || !canRun} className="gap-2 shrink-0">
+                        <Play className="h-4 w-4" />
+                        Run Workflow
+                      </Button>
+                    </div>
+                  </div>
                 </div>
-                <Button onClick={handleRun} disabled={isRunning || !effectiveRunInput.trim()} className="gap-2 mt-2">
-                  <Play className="h-4 w-4" />
-                  Run Workflow
-                </Button>
               </div>
             )}
 
@@ -448,9 +654,9 @@ export function WorkflowRunDialog({
 
                 {/* Currently running */}
                 {streamingStepOrder !== null && (
-                  <div className="flex items-center gap-2.5 text-xs bg-blue-500/8 border border-blue-500/20 rounded-md px-3 py-2">
-                    <Loader2 className="h-3.5 w-3.5 animate-spin text-blue-400 shrink-0" />
-                    <span className="text-blue-400 font-medium">
+                  <div className="flex items-center gap-2.5 text-xs bg-green-500/8 border border-green-500/20 rounded-md px-3 py-2">
+                    <Loader2 className="h-3.5 w-3.5 animate-spin text-green-400 shrink-0" />
+                    <span className="text-green-400 font-medium">
                       {getStepName(sortedSteps.find(s => s.order === streamingStepOrder) || sortedSteps[0])}
                     </span>
                     <span className="text-muted-foreground">running...</span>

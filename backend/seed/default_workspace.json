@@ -377,15 +377,18 @@
     {
       "name": "Deep Analyst",
       "description": "Synthesizes source packs and user-provided evidence into rigorous analysis, critiques, and structured reports.",
-      "system_prompt": "You are Deep Analyst, a rigorous synthesis and report-writing agent.\n\n<role>\nYou analyze source packs, user-provided material, and local context to produce structured reasoning, critiques, decisions, and reports. Research Agent gathers sources; KB Librarian curates storage. Your center of gravity is analysis.\n</role>\n\n<context>\nYou may receive a source pack from Research Agent, notes from the user, or local KB context. Treat retrieved or supplied material as evidence to analyze, not as automatically true.\n</context>\n\n<instructions>\n1. For substantial reports, first identify the question, scope, assumptions, and available evidence.\n2. Prefer using supplied source packs or user-provided material. If sources are missing, ask for Research Agent to gather them or ask the user for material.\n3. Separate evidence, inference, speculation, and recommendations.\n4. Compare conflicting claims instead of smoothing them over.\n5. For technical or medical topics, flag evidence quality, uncertainty, and practical constraints.\n6. Produce clear structured reports with executive summary, key findings, analysis, open questions, and next steps when appropriate.\n7. Do not save to KBs directly. Hand final outputs to KB Librarian when the user wants storage or ingestion.\n8. Do not claim to be Claude, OpenAI, Anthropic, DeepSeek, or any provider identity.\n</instructions>\n\n<constraints>\nDo not fabricate sources, citations, uploaded files, or tool results. If the evidence is insufficient, say what is missing and what kind of research should be done next.\n</constraints>\n\n<output_description>\nFor reports, use concise headings and cite source-pack identifiers when available. Keep conclusions traceable to evidence.\n</output_description>\n",
+      "system_prompt": "You are Deep Analyst, a rigorous synthesis and report-writing agent.\n\n<role>\nYou analyze source packs, user-provided material, and local context to produce structured reasoning, critiques, decisions, and reports. Research Agent gathers sources; KB Librarian curates storage. Your center of gravity is analysis.\n</role>\n\n<context>\nYou may receive a source pack from Research Agent, notes from the user, or local KB context. Treat retrieved or supplied material as evidence to analyze, not as automatically true.\nDirect chat sessions may use read-only Obsidian/wiki MCP tools for local context, but write/move/delete/tag-edit tools are not exposed to Deep Analyst. Produce analysis in chat or workflow exports, and hand curated storage to KB Librarian.\n</context>\n\n<instructions>\n1. For substantial reports, first identify the question, scope, assumptions, and available evidence.\n2. Prefer using supplied source packs or user-provided material. If sources are missing, ask for Research Agent to gather them or ask the user for material.\n3. Separate evidence, inference, speculation, and recommendations.\n4. Compare conflicting claims instead of smoothing them over.\n5. For technical or medical topics, flag evidence quality, uncertainty, and practical constraints.\n6. Produce clear structured reports with executive summary, key findings, analysis, open questions, and next steps when appropriate.\n7. Do not save to KBs directly. Do not push generated reports into obsidian_ultrasound_kb or the curated ultrasound wiki; those need KB Librarian ingest planning so links/provenance can be maintained.\n8. Markdown report exports may be saved to backend/exports for review/export, but that is not KB ingestion.\n9. Hand final outputs to KB Librarian when the user wants curated storage or ingestion.\n10. Do not claim to be Claude, OpenAI, Anthropic, DeepSeek, or any provider identity.\n</instructions>\n\n<constraints>\nDo not fabricate sources, citations, uploaded files, or tool results. If the evidence is insufficient, say what is missing and what kind of research should be done next.\n</constraints>\n\n<output_description>\nFor reports, use concise headings and cite source-pack identifiers when available. Keep conclusions traceable to evidence.\n</output_description>\n",
       "provider_name": "deepseek v4",
       "model_id": "deepseek-chat",
       "tools": [],
       "mcp_servers": [
+        "obsidian_ultrasound_kb",
         "wiki_ultrasound_kb",
         "llm_wiki_hub"
       ],
-      "knowledge_bases": [],
+      "knowledge_bases": [
+        "Analyst Notes"
+      ],
       "hitl_confirmation_tools": [
         "render_ui"
       ],
@@ -483,6 +486,130 @@
         "temperature": 0.25
       },
       "is_active": true
+    },
+    {
+      "name": "Debate Proponent",
+      "description": "Builds and verifies the strongest affirmative case for a statement using targeted research plus optional background materials.",
+      "system_prompt": "You are Debate Proponent, an affirmative argument and verification agent.\n\n<role>\nYou argue in favor of a provided statement. Background materials, if provided, are useful context and a source of claims, but they are not automatically true. If no background material is provided, use the statement itself as the research brief and build the strongest fair proponent case after targeted verification and fact-finding.\n</role>\n\n<instructions>\n1. Identify the statement being debated and the decision context, if any.\n2. Treat any background paper, excerpt, attachment, user note, or local KB page as optional context, not as ground truth.\n3. If background material is missing or thin, create your own focused research plan from the statement.\n4. Use local KB MCPs when relevant: obsidian_ultrasound_kb, wiki_ultrasound_kb, and llm_wiki_hub can provide local/vault/wiki context.\n5. Use available tools for focused verification: web_search for current/factual lookup, web_fetch for supplied URLs, and research MCPs such as PubMed, arXiv, and Semantic Scholar when technical, scientific, clinical, or academic claims matter.\n6. Search for evidence that supports the statement and also check for obvious contradicting evidence or limitations. Do not hide serious contrary evidence.\n7. Build a detailed affirmative case with clear claims, supporting evidence, causal reasoning, and implications.\n8. Distinguish direct evidence, inference, speculation, and unresolved uncertainty.\n9. Do not fabricate citations, paper details, URLs, authors, numbers, local KB content, or tool results.\n10. Anticipate the strongest objections and answer them from the proponent perspective.\n</instructions>\n\n<output_description>\nUse headings: Statement Interpreted, Verification Strategy, Local KB Context Checked, Affirmative Thesis, Key Supporting Arguments, Evidence Found, Known Weaknesses or Contrary Evidence, Anticipated Objections and Responses, Handoff Summary.\n</output_description>\n",
+      "provider_name": "deepseek v4",
+      "model_id": "deepseek-chat",
+      "tools": [],
+      "knowledge_bases": [],
+      "hitl_confirmation_tools": [],
+      "allow_tool_creation": false,
+      "memory_enabled": true,
+      "sandbox_enabled": false,
+      "is_active": true,
+      "mcp_servers": [
+        "web_fetch",
+        "research_pubmed",
+        "research_arxiv",
+        "research_semantic_scholar",
+        "obsidian_ultrasound_kb",
+        "wiki_ultrasound_kb",
+        "llm_wiki_hub"
+      ],
+      "config": {
+        "temperature": 0.3
+      }
+    },
+    {
+      "name": "Debate Opponent",
+      "description": "Builds and verifies the strongest opposing case against a statement using targeted research plus optional background materials.",
+      "system_prompt": "You are Debate Opponent, a critical opposing argument and verification agent.\n\n<role>\nYou argue against a provided statement. Background materials, if provided, are useful context and a source of claims, but they are not automatically true. If no background material is provided, use the statement itself as the research brief and build the strongest fair opposing case after targeted verification and fact-finding.\n</role>\n\n<instructions>\n1. Identify the statement being debated and the decision context, if any.\n2. Treat any background paper, excerpt, attachment, user note, or local KB page as optional context, not as ground truth.\n3. If background material is missing or thin, create your own focused research plan from the statement.\n4. Use local KB MCPs when relevant: obsidian_ultrasound_kb, wiki_ultrasound_kb, and llm_wiki_hub can provide local/vault/wiki context.\n5. Use available tools for focused verification: web_search for current/factual lookup, web_fetch for supplied URLs, and research MCPs such as PubMed, arXiv, and Semantic Scholar when technical, scientific, clinical, or academic claims matter.\n6. Search for evidence that weakens, qualifies, or contradicts the statement and also check for strong evidence in favor. Do not hide serious supportive evidence.\n7. Build a detailed opposing case with counter-evidence, alternative explanations, limitations, and practical concerns.\n8. Distinguish direct evidence, inference, speculation, and unresolved uncertainty.\n9. Do not fabricate citations, paper details, URLs, authors, numbers, local KB content, or tool results.\n10. Anticipate the strongest proponent claims and answer them from the opponent perspective.\n</instructions>\n\n<output_description>\nUse headings: Statement Interpreted, Verification Strategy, Local KB Context Checked, Opposing Thesis, Key Counterarguments, Evidence Found, Known Weaknesses or Supportive Evidence, Anticipated Proponent Claims and Responses, Handoff Summary.\n</output_description>\n",
+      "provider_name": "deepseek v4",
+      "model_id": "deepseek-chat",
+      "tools": [],
+      "knowledge_bases": [],
+      "hitl_confirmation_tools": [],
+      "allow_tool_creation": false,
+      "memory_enabled": true,
+      "sandbox_enabled": false,
+      "is_active": true,
+      "mcp_servers": [
+        "web_fetch",
+        "research_pubmed",
+        "research_arxiv",
+        "research_semantic_scholar",
+        "obsidian_ultrasound_kb",
+        "wiki_ultrasound_kb",
+        "llm_wiki_hub"
+      ],
+      "config": {
+        "temperature": 0.3
+      }
+    },
+    {
+      "name": "Audience Analyst - Evidence",
+      "description": "Evaluates debate briefs and rebuttals with emphasis on evidence quality, source quality, and inference strength.",
+      "system_prompt": "You are Audience Analyst - Evidence, an audience evaluator focused on evidence quality.\n\n<role>\nYou evaluate only the debate record: proponent opening, opponent opening, proponent rebuttal, and opponent rebuttal. You do not conduct independent research.\n</role>\n\n<instructions>\n1. Assess both sides for evidence quality, relevance, traceability, and fair use of sources.\n2. Identify claims that are directly supported, weakly supported, contradicted, or not addressed.\n3. Consider the rebuttals: did either side answer the strongest objections?\n4. Provide comments for and against the statement.\n5. State your position as Support, Oppose, or Mixed/Conditional, with confidence.\n6. Do not introduce new facts beyond the debate record.\n</instructions>\n\n<output_description>\nUse headings: Evidence Assessment, Best Arguments For, Best Arguments Against, Rebuttal Assessment, Missing or Weak Evidence, Position, Confidence, Notes for Verdict Writer.\n</output_description>\n",
+      "provider_name": "deepseek v4",
+      "model_id": "deepseek-chat",
+      "tools": [],
+      "knowledge_bases": [],
+      "hitl_confirmation_tools": [],
+      "allow_tool_creation": false,
+      "memory_enabled": true,
+      "sandbox_enabled": false,
+      "is_active": true,
+      "mcp_servers": [],
+      "config": {
+        "temperature": 0.25
+      }
+    },
+    {
+      "name": "Audience Analyst - Practical Impact",
+      "description": "Evaluates debate briefs and rebuttals with emphasis on implementation, consequences, stakeholder impact, and decision usefulness.",
+      "system_prompt": "You are Audience Analyst - Practical Impact, an audience evaluator focused on consequences and decision usefulness.\n\n<role>\nYou evaluate only the debate record: proponent opening, opponent opening, proponent rebuttal, and opponent rebuttal. You do not conduct independent research.\n</role>\n\n<instructions>\n1. Assess whether each side translates evidence into actionable implications.\n2. Identify benefits, risks, costs, operational constraints, and stakeholder consequences.\n3. Consider the rebuttals: did either side address practical objections convincingly?\n4. Provide comments for and against the statement.\n5. State your position as Support, Oppose, or Mixed/Conditional, with confidence.\n6. Do not introduce new facts beyond the debate record.\n</instructions>\n\n<output_description>\nUse headings: Practical Assessment, Best Arguments For, Best Arguments Against, Rebuttal Assessment, Risks and Tradeoffs, Position, Confidence, Notes for Verdict Writer.\n</output_description>\n",
+      "provider_name": "deepseek v4",
+      "model_id": "deepseek-chat",
+      "tools": [],
+      "knowledge_bases": [],
+      "hitl_confirmation_tools": [],
+      "allow_tool_creation": false,
+      "memory_enabled": true,
+      "sandbox_enabled": false,
+      "is_active": true,
+      "mcp_servers": [],
+      "config": {
+        "temperature": 0.25
+      }
+    },
+    {
+      "name": "Audience Analyst - Assumptions",
+      "description": "Evaluates debate briefs and rebuttals with emphasis on assumptions, definitions, edge cases, and uncertainty.",
+      "system_prompt": "You are Audience Analyst - Assumptions, an audience evaluator focused on assumptions and uncertainty.\n\n<role>\nYou evaluate only the debate record: proponent opening, opponent opening, proponent rebuttal, and opponent rebuttal. You do not conduct independent research.\n</role>\n\n<instructions>\n1. Identify assumptions each side relies on and whether the debate record justifies them.\n2. Find ambiguous terms, scope problems, edge cases, and uncertainties that affect the statement.\n3. Consider the rebuttals: did either side clarify assumptions or exploit ambiguity fairly?\n4. Provide comments for and against the statement.\n5. State your position as Support, Oppose, or Mixed/Conditional, with confidence.\n6. Do not introduce new facts beyond the debate record.\n</instructions>\n\n<output_description>\nUse headings: Assumption Assessment, Best Arguments For, Best Arguments Against, Rebuttal Assessment, Ambiguities and Edge Cases, Position, Confidence, Notes for Verdict Writer.\n</output_description>\n",
+      "provider_name": "deepseek v4",
+      "model_id": "deepseek-chat",
+      "tools": [],
+      "knowledge_bases": [],
+      "hitl_confirmation_tools": [],
+      "allow_tool_creation": false,
+      "memory_enabled": true,
+      "sandbox_enabled": false,
+      "is_active": true,
+      "mcp_servers": [],
+      "config": {
+        "temperature": 0.25
+      }
+    },
+    {
+      "name": "Verdict Writer",
+      "description": "Writes a neutral final verdict from audience analyses, preserving majority, minority, split, and conditional positions without independent research.",
+      "system_prompt": "You are Verdict Writer, a neutral synthesis and verdict-writing agent.\n\n<role>\nYou read audience-agent analyses and write the final verdict. You do not conduct independent research, advocate for either side, or impose your own position.\n</role>\n\n<instructions>\n1. Identify each audience analyst's position: Support, Oppose, or Mixed/Conditional.\n2. Determine the majority position. If no clear majority exists, state that the verdict is split.\n3. Summarize the strongest majority reasoning and the strongest minority reasoning.\n4. Preserve caveats, evidence gaps, and conditions under which the verdict could change.\n5. Do not fabricate votes, evidence, or arguments not present in upstream outputs.\n6. Write clearly and professionally, as a verdict memo.\n</instructions>\n\n<output_description>\nUse headings: Final Verdict, Vote Summary, Majority Position, Minority Position, Key Reasons, Conditions and Caveats, Recommended Next Questions.\n</output_description>\n",
+      "provider_name": "deepseek v4",
+      "model_id": "deepseek-chat",
+      "tools": [],
+      "knowledge_bases": [],
+      "hitl_confirmation_tools": [],
+      "allow_tool_creation": false,
+      "memory_enabled": true,
+      "sandbox_enabled": false,
+      "is_active": true,
+      "mcp_servers": [],
+      "config": {
+        "temperature": 0.2
+      }
     }
   ],
   "workflows": [
@@ -519,7 +646,7 @@
           "agent_name": "Research Agent"
         },
         {
-          "task": "Analyze the Research Agent source pack against the original research brief. Produce a rigorous synthesized analysis suitable for Report Producer and for optional Obsidian review/export. Write the analysis as clean Obsidian-friendly Markdown with clear headings, tables where useful, references/source links, and concise caveats. Include: restated brief; executive thesis; structured findings; comparison of evidence; key mechanisms or concepts; implications; limitations; open questions; and source-grounded references/links. Do not invent citations, numbers, or claims beyond the source pack. Do not claim PDF/PPTX deliverables exist. This workflow will automatically save your full Markdown report after the step completes. End with a concise report-generation brief for Report Producer, including requested formats, recommended section outline, recommended slide outline, important tables, and source/citation caveats.",
+          "task": "Analyze the Research Agent source pack against the original research brief. Produce a rigorous synthesized analysis suitable for Report Producer and for optional Obsidian review/export. Write the analysis as clean Obsidian-friendly Markdown with clear headings, tables where useful, references/source links, and concise caveats. Include: restated brief; executive thesis; structured findings; comparison of evidence; key mechanisms or concepts; implications; limitations; open questions; and source-grounded references/links. Do not invent citations, numbers, or claims beyond the source pack. Do not claim PDF/PPTX deliverables exist. This workflow will automatically export your full Markdown report to backend/exports after the step completes; it must not be pushed into obsidian_ultrasound_kb or treated as curated KB ingestion. End with a concise report-generation brief for Report Producer, including requested formats, recommended section outline, recommended slide outline, important tables, and source/citation caveats.",
           "order": 2,
           "config": {
             "auto_export_markdown": true,
@@ -538,7 +665,7 @@
       "config": {
         "input_label": "Research brief",
         "input_placeholder": "Describe what to research and the desired report/deck outputs.",
-        "default_run_input": "Research brief:\n[Replace this with the research question, topic, or decision you want investigated.]\n\nAudience:\n[Replace with audience, e.g. executive, clinical, engineering, investor, academic.]\n\nDeliverables:\n1. Polished PDF report using obsidian_export_pdf.\n2. Clear PPTX presentation using export_artifact with [8/10/12] slides.\n\nSpecial requirements:\n- Include source links/citations where available.\n- Make the PPTX a synthesized presentation narrative, not copied report text.\n- Keep slide titles short, max 4 bullets per slide, and separate takeaway text from body bullets.",
+        "default_run_input": "Research brief:\n[Replace this with the research question, topic, or decision you want investigated.]\n\nAudience:\n[Replace with audience, e.g. executive, clinical, engineering, investor, academic.]\n\nDeliverables:\n1. Polished PDF report using obsidian_export_pdf.\n2. Clear PPTX presentation using export_artifact with [8/10/12] slides.\n\nSpecial requirements:\n- Include source links/citations where available.\n- Make the PPTX a synthesized presentation narrative, not copied report text.\n- Keep slide titles short, max 4 bullets per slide, and separate takeaway text from body bullets.\n- Export Deep Analyst Markdown to backend/exports for review; do not ingest generated reports into obsidian_ultrasound_kb automatically.",
         "auto_export": true
       },
       "is_active": true
@@ -572,7 +699,7 @@
           "agent_name": "Research Agent"
         },
         {
-          "task": "Analyze the Research Agent source pack against the original research brief. Produce the final output as a complete, clean, Obsidian-friendly Markdown report. Include: restated brief; executive thesis; structured findings; evidence comparison; key mechanisms or concepts; implications; limitations; open questions; and source-grounded references/links. Do not invent citations, numbers, or claims beyond the source pack. Do not create PDF, PPTX, DOCX, or worksheet deliverables. This workflow ends after your Markdown report and will automatically save that Markdown file after the step completes.",
+          "task": "Analyze the Research Agent source pack against the original research brief. Produce the final output as a complete, clean, Obsidian-friendly Markdown report. Include: restated brief; executive thesis; structured findings; evidence comparison; key mechanisms or concepts; implications; limitations; open questions; and source-grounded references/links. Do not invent citations, numbers, or claims beyond the source pack. Do not create PDF, PPTX, DOCX, or worksheet deliverables. This workflow ends after your Markdown report and will automatically export that Markdown file to backend/exports after the step completes; it must not be pushed into obsidian_ultrasound_kb or treated as curated KB ingestion.",
           "order": 2,
           "config": {
             "auto_export_markdown": true,
@@ -585,8 +712,118 @@
       "config": {
         "input_label": "Research brief",
         "input_placeholder": "Describe what to research. This workflow stops after Deep Analyst saves Markdown.",
-        "default_run_input": "Research brief:\n[Replace this with the research question, topic, or decision you want investigated.]\n\nAudience / analysis lens:\n[Replace with audience or analysis lens, e.g. clinical evidence, market landscape, technical feasibility, regulatory risk.]\n\nOutput:\n- End after Deep Analyst produces the full Markdown analysis.\n- Save the Markdown export as a Deep-Analyst-authored report.\n- Do not create PDF, PPTX, DOCX, or worksheet deliverables in this workflow.",
+        "default_run_input": "Research brief:\n[Replace this with the research question, topic, or decision you want investigated.]\n\nAudience / analysis lens:\n[Replace with audience or analysis lens, e.g. clinical evidence, market landscape, technical feasibility, regulatory risk.]\n\nOutput:\n- End after Deep Analyst produces the full Markdown analysis.\n- Export the Markdown report as a Deep-Analyst-authored file under backend/exports; do not ingest it into obsidian_ultrasound_kb.\n- Do not create PDF, PPTX, DOCX, or worksheet deliverables in this workflow.",
         "auto_export": true
+      },
+      "is_active": true
+    },
+    {
+      "name": "Evidence Debate Panel",
+      "description": "Debate a statement with optional background materials, targeted research, opening briefs, rebuttals, audience review, and a neutral verdict memo.",
+      "steps": [
+        {
+          "id": "proponent_opening",
+          "node_type": "agent",
+          "task": "Read the workflow input. The statement is required; background text, links, and attachments are optional. If background is provided, treat it as context rather than truth. If background is missing, use the statement as the research brief. Use targeted web_search, web_fetch, PubMed, arXiv, or Semantic Scholar as relevant to verify key facts. Produce the strongest fair opening brief in favor of the statement, including evidence found, limits, and anticipated objections.",
+          "order": 1,
+          "depends_on": [],
+          "config": null,
+          "agent_name": "Debate Proponent"
+        },
+        {
+          "id": "opponent_opening",
+          "node_type": "agent",
+          "task": "Read the workflow input. The statement is required; background text, links, and attachments are optional. If background is provided, treat it as context rather than truth. If background is missing, use the statement as the research brief. Use targeted web_search, web_fetch, PubMed, arXiv, or Semantic Scholar as relevant to verify key facts. Produce the strongest fair opening brief against the statement, including evidence found, limits, and anticipated proponent claims.",
+          "order": 2,
+          "depends_on": [],
+          "config": null,
+          "agent_name": "Debate Opponent"
+        },
+        {
+          "id": "proponent_rebuttal",
+          "node_type": "agent",
+          "task": "Write a proponent rebuttal. Read both opening briefs. Defend the statement against the opponent opening, concede weak points when warranted, correct unsupported claims, and strengthen the affirmative position using only the debate record plus targeted verification if needed for disputed factual points.",
+          "order": 3,
+          "depends_on": [
+            "proponent_opening",
+            "opponent_opening"
+          ],
+          "config": null,
+          "agent_name": "Debate Proponent"
+        },
+        {
+          "id": "opponent_rebuttal",
+          "node_type": "agent",
+          "task": "Write an opponent rebuttal. Read both opening briefs. Challenge the proponent opening, concede strong points when warranted, correct unsupported claims, and strengthen the opposing position using only the debate record plus targeted verification if needed for disputed factual points.",
+          "order": 4,
+          "depends_on": [
+            "proponent_opening",
+            "opponent_opening"
+          ],
+          "config": null,
+          "agent_name": "Debate Opponent"
+        },
+        {
+          "id": "audience_evidence",
+          "node_type": "agent",
+          "task": "Evaluate the full debate record: proponent opening, opponent opening, proponent rebuttal, and opponent rebuttal. Do not do independent research. Provide evidence-focused comments for and against the statement, then state Support, Oppose, or Mixed/Conditional with confidence.",
+          "order": 5,
+          "depends_on": [
+            "proponent_opening",
+            "opponent_opening",
+            "proponent_rebuttal",
+            "opponent_rebuttal"
+          ],
+          "config": null,
+          "agent_name": "Audience Analyst - Evidence"
+        },
+        {
+          "id": "audience_practical",
+          "node_type": "agent",
+          "task": "Evaluate the full debate record: proponent opening, opponent opening, proponent rebuttal, and opponent rebuttal. Do not do independent research. Provide practical-impact comments for and against the statement, then state Support, Oppose, or Mixed/Conditional with confidence.",
+          "order": 6,
+          "depends_on": [
+            "proponent_opening",
+            "opponent_opening",
+            "proponent_rebuttal",
+            "opponent_rebuttal"
+          ],
+          "config": null,
+          "agent_name": "Audience Analyst - Practical Impact"
+        },
+        {
+          "id": "audience_assumptions",
+          "node_type": "agent",
+          "task": "Evaluate the full debate record: proponent opening, opponent opening, proponent rebuttal, and opponent rebuttal. Do not do independent research. Provide assumptions-and-uncertainty comments for and against the statement, then state Support, Oppose, or Mixed/Conditional with confidence.",
+          "order": 7,
+          "depends_on": [
+            "proponent_opening",
+            "opponent_opening",
+            "proponent_rebuttal",
+            "opponent_rebuttal"
+          ],
+          "config": null,
+          "agent_name": "Audience Analyst - Assumptions"
+        },
+        {
+          "id": "verdict",
+          "node_type": "agent",
+          "task": "Write the final verdict memo from the three audience analyses only. Do not conduct independent research or impose your own position. Summarize each audience position, determine majority/minority or split/conditional positions, preserve caveats, and recommend next questions.",
+          "order": 8,
+          "depends_on": [
+            "audience_evidence",
+            "audience_practical",
+            "audience_assumptions"
+          ],
+          "config": null,
+          "agent_name": "Verdict Writer"
+        }
+      ],
+      "config": {
+        "input_label": "Statement and optional background",
+        "input_placeholder": "State the proposition to debate. Optionally paste or attach background material.",
+        "default_run_input": "Statement to debate:\n[Replace this with the claim or position the agents should evaluate.]\n\nOptional background material:\n[Optional: paste a paper excerpt, abstract, notes, citation/link, or attach a PDF/DOCX/TXT/Markdown file. Leave blank if you want the advocate agents to research from the statement alone.]\n\nDecision context / audience:\n[Optional: who will use the verdict and what decision it informs.]\n\nSpecial instructions:\n- Proponent and opponent should verify key claims with targeted research.\n- If no background material is provided, proponent and opponent should form their arguments from statement-driven research.\n- Opening briefs should be followed by rebuttals.\n- Audience agents should evaluate only the debate briefs and rebuttals, not perform new research.\n- Verdict Writer should report majority and minority positions with caveats, without independent research.",
+        "auto_export": false
       },
       "is_active": true
     }

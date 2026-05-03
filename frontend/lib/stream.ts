@@ -1,4 +1,4 @@
-import type { Message, ToolCall, ReasoningStep, AgentStep, ToolRound, FileAttachment, WorkflowStepResult, FileNode, HITLApprovalEvent, ToolProposalEvent, ArtifactEvent, NodeStartEvent, NodeCompleteEvent, NodeErrorEvent, NodeContentDeltaEvent } from "@/types/playground"
+import type { Message, ToolCall, ReasoningStep, AgentStep, ToolRound, FileAttachment, FileNode, HITLApprovalEvent, ToolProposalEvent, ArtifactEvent, NodeStartEvent, NodeCompleteEvent, NodeErrorEvent, NodeContentDeltaEvent } from "@/types/playground"
 
 // Stream directly to the backend, bypassing the Next.js rewrite proxy
 // which buffers the entire SSE response instead of streaming it through.
@@ -237,7 +237,8 @@ export async function streamWorkflow(
   onWorkflowComplete: (event: WorkflowCompleteEvent) => void,
   onWorkflowError: (runId: string, error: string) => void,
   signal?: AbortSignal,
-  // DAG node callbacks (optional — only fired for DAG workflows)
+  attachments?: FileAttachment[],
+  // DAG node callbacks (optional; only fired for DAG workflows)
   onNodeStart?: (event: NodeStartEvent) => void,
   onNodeContentDelta?: (event: NodeContentDeltaEvent) => void,
   onNodeComplete?: (event: NodeCompleteEvent) => void,
@@ -249,7 +250,15 @@ export async function streamWorkflow(
       "Content-Type": "application/json",
       Authorization: `Bearer ${accessToken}`,
     },
-    body: JSON.stringify({ input }),
+    body: JSON.stringify({
+      input,
+      attachments: attachments?.map((a) => ({
+        filename: a.filename,
+        media_type: a.media_type,
+        file_type: a.file_type,
+        data: a.data,
+      })),
+    }),
     signal,
   })
 

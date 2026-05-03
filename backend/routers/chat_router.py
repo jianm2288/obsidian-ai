@@ -1048,7 +1048,7 @@ def _load_mcp_server_configs(agent, db) -> list[dict]:
 
     configs = []
     for s in servers:
-        configs.append({
+        config = {
             "id": str(s.id),
             "name": s.name,
             "transport_type": s.transport_type,
@@ -1057,7 +1057,10 @@ def _load_mcp_server_configs(agent, db) -> list[dict]:
             "env_json": s.env_json,
             "url": s.url,
             "headers_json": s.headers_json,
-        })
+        }
+        if _agent_uses_read_only_vaults(agent, s.name):
+            config["allowed_mcp_tools"] = _READ_ONLY_VAULT_TOOLS
+        configs.append(config)
     return configs
 
 
@@ -1083,6 +1086,8 @@ async def _load_mcp_server_configs_mongo(agent, mongo_db) -> list[dict]:
         server = await MCPServerCollection.find_by_id(mongo_db, str(sid))
         if server and server.get("is_active", True):
             server["id"] = str(server["_id"])
+            if _agent_dict_uses_read_only_vaults(agent, server.get("name")):
+                server["allowed_mcp_tools"] = _READ_ONLY_VAULT_TOOLS
             configs.append(server)
     return configs
 
@@ -1092,6 +1097,27 @@ def _merge_tools(native_tools: list[dict] | None, mcp_tools: list[dict]) -> list
     all_tools = list(native_tools or [])
     all_tools.extend(mcp_tools)
     return all_tools if all_tools else None
+
+
+_READ_ONLY_VAULT_SERVER_NAMES = {"obsidian_ultrasound_kb", "wiki_ultrasound_kb", "llm_wiki_hub"}
+_READ_ONLY_VAULT_TOOLS = {
+    "read_note",
+    "list_directory",
+    "search_notes",
+    "read_multiple_notes",
+    "get_notes_info",
+    "get_frontmatter",
+    "get_vault_stats",
+    "list_all_tags",
+}
+
+
+def _agent_uses_read_only_vaults(agent, server_name: str) -> bool:
+    return getattr(agent, "name", None) == "Deep Analyst" and server_name in _READ_ONLY_VAULT_SERVER_NAMES
+
+
+def _agent_dict_uses_read_only_vaults(agent: dict, server_name: str | None) -> bool:
+    return agent.get("name") == "Deep Analyst" and server_name in _READ_ONLY_VAULT_SERVER_NAMES
 
 
 async def _execute_mcp_or_native_tool(
@@ -1110,6 +1136,8 @@ async def _execute_mcp_or_native_tool(
         server_name, original_tool_name = parsed
         conn = mcp_connections.get(server_name)
         if conn:
+            if tc_name not in conn.tool_names:
+                return json.dumps({"error": f"MCP tool '{original_tool_name}' is not allowed for this agent"})
             try:
                 args = json.loads(tc_arguments) if tc_arguments else {}
             except json.JSONDecodeError:
@@ -1137,6 +1165,8 @@ async def _execute_mcp_or_native_tool_mongo(
         server_name, original_tool_name = parsed
         conn = mcp_connections.get(server_name)
         if conn:
+            if tc_name not in conn.tool_names:
+                return json.dumps({"error": f"MCP tool '{original_tool_name}' is not allowed for this agent"})
             try:
                 args = json.loads(tc_arguments) if tc_arguments else {}
             except json.JSONDecodeError:
@@ -1155,6 +1185,17 @@ async def _connect_mcp_servers(stack: AsyncExitStack, mcp_server_configs: list[d
     for config in mcp_server_configs:
         try:
             conn = await stack.enter_async_context(connect_mcp_server(config))
+            allowed_tools = set(config.get("allowed_mcp_tools") or [])
+            if allowed_tools:
+                conn.tools = [
+                    tool for tool in conn.tools
+                    if tool.get("function", {}).get("name", "").split("__")[-1] in allowed_tools
+                ]
+                conn.tool_names = {
+                    tool.get("function", {}).get("name", "")
+                    for tool in conn.tools
+                    if tool.get("function", {}).get("name")
+                }
             mcp_connections[conn.server_name] = conn
             all_mcp_tools.extend(conn.tools)
         except Exception as e:
