@@ -1,0 +1,594 @@
+{
+  "version": 1,
+  "description": "Portable default Obsidian AI workspace definitions. This file intentionally excludes sessions, workflow runs, exported reports, documents, and secrets.",
+  "providers": [
+    {
+      "name": "qwen3:8b",
+      "provider_type": "ollama",
+      "base_url": "http://172.20.170.55:11435",
+      "model_id": null,
+      "is_active": true,
+      "config": null,
+      "base_url_env": "OLLAMA_BASE_URL"
+    },
+    {
+      "name": "deepseek v4",
+      "provider_type": "custom",
+      "base_url": "https://api.deepseek.com",
+      "model_id": null,
+      "is_active": true,
+      "config": null,
+      "base_url_env": "DEEPSEEK_BASE_URL",
+      "api_key_env": "DEEPSEEK_API_KEY"
+    }
+  ],
+  "tools": [
+    {
+      "name": "get_weather",
+      "description": "Get the current weather for any location",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "location": {
+            "type": "string",
+            "description": "The city or location to get weather for"
+          }
+        },
+        "required": [
+          "location"
+        ]
+      },
+      "handler_type": "python",
+      "handler_config": {
+        "code": "def handler(params):\n    import urllib.request, json\n    location = params.get('location', 'London')\n    # Step 1: Geocode the location using Open-Meteo geocoding API\n    geo_url = f'https://geocoding-api.open-meteo.com/v1/search?name={urllib.request.quote(location)}&count=1&language=en&format=json'\n    with urllib.request.urlopen(geo_url) as r:\n        geo = json.loads(r.read())\n    if not geo.get('results'):\n        return {'error': f'Location not found: {location}'}\n    result = geo['results'][0]\n    lat, lon = result['latitude'], result['longitude']\n    name = result.get('name', location)\n    country = result.get('country', '')\n    # Step 2: Fetch weather from Open-Meteo\n    wx_url = (f'https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}'\n              '&current=temperature_2m,relative_humidity_2m,wind_speed_10m,weather_code'\n              '&temperature_unit=celsius&wind_speed_unit=kmh&timezone=auto')\n    with urllib.request.urlopen(wx_url) as r:\n        wx = json.loads(r.read())\n    cur = wx['current']\n    wmo = {0:'Clear sky',1:'Mainly clear',2:'Partly cloudy',3:'Overcast',45:'Fog',48:'Icy fog',51:'Light drizzle',53:'Moderate drizzle',55:'Dense drizzle',61:'Slight rain',63:'Moderate rain',65:'Heavy rain',71:'Slight snow',73:'Moderate snow',75:'Heavy snow',80:'Slight showers',81:'Moderate showers',82:'Violent showers',95:'Thunderstorm',96:'Thunderstorm w/ hail',99:'Thunderstorm w/ heavy hail'}\n    code = cur.get('weather_code', 0)\n    condition = wmo.get(code, f'Code {code}')\n    temp_c = cur['temperature_2m']\n    temp_f = round(temp_c * 9/5 + 32, 1)\n    return {\n        'location': f'{name}, {country}',\n        'temperature_c': temp_c,\n        'temperature_f': temp_f,\n        'humidity_pct': cur['relative_humidity_2m'],\n        'wind_kmh': cur['wind_speed_10m'],\n        'condition': condition,\n    }"
+      },
+      "requires_confirmation": false,
+      "is_active": true,
+      "is_model_created": false
+    },
+    {
+      "name": "web_search",
+      "description": "Search the live web using Tavily. Use for current facts, weather, news, and recent information.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "Search query, including location and date when relevant"
+          },
+          "max_results": {
+            "type": "integer",
+            "description": "Maximum number of results",
+            "default": 5
+          },
+          "limit": {
+            "type": "integer",
+            "description": "Backward-compatible alias for max_results",
+            "default": 5
+          }
+        },
+        "required": [
+          "query"
+        ]
+      },
+      "handler_type": "python",
+      "handler_config": {
+        "code": "def handler(params):\n    import json\n    import os\n    import urllib.request\n\n    query = (params.get('query') or '').strip()\n    if not query:\n        return {'error': 'query is required'}\n\n    max_results = params.get('max_results', params.get('limit', 5))\n    try:\n        max_results = int(max_results)\n    except Exception:\n        max_results = 5\n    max_results = min(max(1, max_results), 20)\n\n    api_key = os.environ.get('TAVILY_API_KEY', '').strip()\n    if not api_key:\n        return {\n            'query': query,\n            'results': [],\n            'note': 'TAVILY_API_KEY is not loaded in the backend process. Add it to backend/.env and restart the backend.'\n        }\n\n    payload = json.dumps({\n        'api_key': api_key,\n        'query': query,\n        'max_results': max_results,\n        'search_depth': 'basic',\n        'include_answer': False,\n        'include_raw_content': False,\n    }).encode('utf-8')\n\n    req = urllib.request.Request(\n        'https://api.tavily.com/search',\n        data=payload,\n        headers={'Content-Type': 'application/json'},\n        method='POST',\n    )\n\n    try:\n        with urllib.request.urlopen(req, timeout=20) as resp:\n            data = json.loads(resp.read().decode('utf-8'))\n    except Exception as exc:\n        return {'query': query, 'results': [], 'note': 'Search failed: %s' % exc}\n\n    results = []\n    for item in data.get('results', []):\n        results.append({\n            'title': item.get('title', ''),\n            'snippet': item.get('content', ''),\n            'url': item.get('url', ''),\n        })\n\n    if not results:\n        return {'query': query, 'results': [], 'note': 'No results found.'}\n    return {'query': query, 'results': results}"
+      },
+      "requires_confirmation": false,
+      "is_active": true,
+      "is_model_created": false
+    },
+    {
+      "name": "calculator",
+      "description": "Evaluate mathematical expressions",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "expression": {
+            "type": "string",
+            "description": "The math expression to evaluate (e.g. '2 + 2 * 3')"
+          }
+        },
+        "required": [
+          "expression"
+        ]
+      },
+      "handler_type": "python",
+      "handler_config": {
+        "code": "def handler(params):\n    import ast\n    expr = params.get('expression', '')\n    result = eval(compile(ast.parse(expr, mode='eval'), '<expr>', 'eval'))\n    return {'result': str(result)}"
+      },
+      "requires_confirmation": false,
+      "is_active": true,
+      "is_model_created": false
+    },
+    {
+      "name": "get_datetime",
+      "description": "Get the current date and time",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "timezone": {
+            "type": "string",
+            "description": "Timezone (e.g. 'UTC', 'US/Eastern')",
+            "default": "UTC"
+          }
+        },
+        "required": []
+      },
+      "handler_type": "python",
+      "handler_config": {
+        "code": "def handler(params):\n    from datetime import datetime, timezone\n    tz = params.get('timezone', 'UTC')\n    now = datetime.now(timezone.utc)\n    return {'datetime': now.isoformat(), 'timezone': tz}"
+      },
+      "requires_confirmation": false,
+      "is_active": true,
+      "is_model_created": false
+    },
+    {
+      "name": "render_ui",
+      "description": "Returns structured data rendered as a rich UI card",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "Text to analyze"
+          }
+        },
+        "required": [
+          "query"
+        ]
+      },
+      "handler_type": "python",
+      "handler_config": {
+        "code": "def handler(params):\n    query = params.get('query', '')\n    words = len(query.split())\n    chars = len(query)\n    # Return a stat card; the UI will render this as a rich component.\n    # Supported _ui_type: 'stat' (title, value, label)\n    return {\n        '_ui_type': 'stat',\n        'title': 'Text Analysis',\n        'value': f'{words} word{\"s\" if words != 1 else \"\"}',\n        'label': f'{chars} character{\"s\" if chars != 1 else \"\"} - rendered as a generative UI card',\n    }"
+      },
+      "requires_confirmation": false,
+      "is_active": true,
+      "is_model_created": false
+    }
+  ],
+  "mcp_servers": [
+    {
+      "name": "local_filesystem",
+      "description": "MCP filesystem access scoped to this obsidian-ai project folder.",
+      "transport_type": "stdio",
+      "command": "{NPX}",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "{PROJECT_ROOT}"
+      ],
+      "env": null,
+      "url": null,
+      "headers": null,
+      "is_active": true
+    },
+    {
+      "name": "obsidian_notes",
+      "description": "Local notes/vault access scoped to ./local-notes. Edit the path if you want this pointed at a real Obsidian vault.",
+      "transport_type": "stdio",
+      "command": "{NPX}",
+      "args": [
+        "-y",
+        "@bitbonsai/mcpvault@latest",
+        "{PROJECT_ROOT}\\local-notes"
+      ],
+      "env": null,
+      "url": null,
+      "headers": null,
+      "is_active": true
+    },
+    {
+      "name": "app_sqlite",
+      "description": "SQLite MCP connection to the app database at backend/app.db. Use carefully because this can inspect and modify app data.",
+      "transport_type": "stdio",
+      "command": "{UVX}",
+      "args": [
+        "mcp-server-sqlite",
+        "--db-path",
+        "{BACKEND_DIR}\\app.db"
+      ],
+      "env": null,
+      "url": null,
+      "headers": null,
+      "is_active": true
+    },
+    {
+      "name": "project_git",
+      "description": "Git MCP connection scoped to this repository.",
+      "transport_type": "stdio",
+      "command": "{UVX}",
+      "args": [
+        "mcp-server-git",
+        "--repository",
+        "{PROJECT_ROOT}"
+      ],
+      "env": null,
+      "url": null,
+      "headers": null,
+      "is_active": true
+    },
+    {
+      "name": "web_fetch",
+      "description": "General web page fetching and markdown extraction through MCP. Complements Tavily search by reading specific URLs.",
+      "transport_type": "stdio",
+      "command": "{UVX}",
+      "args": [
+        "mcp-server-fetch"
+      ],
+      "env": null,
+      "url": null,
+      "headers": null,
+      "is_active": true
+    },
+    {
+      "name": "research_pubmed",
+      "description": "PubMed literature-search MCP server for biomedical/scientific papers. Optional: add NCBI_API_KEY later for higher rate limits.",
+      "transport_type": "stdio",
+      "command": "{NPX}",
+      "args": [
+        "-y",
+        "@cyanheads/pubmed-mcp-server"
+      ],
+      "env": {
+        "MCP_TRANSPORT_TYPE": "stdio",
+        "MCP_LOG_LEVEL": "warning"
+      },
+      "url": null,
+      "headers": null,
+      "is_active": true
+    },
+    {
+      "name": "obsidian_ultrasound_kb",
+      "description": "Obsidian/local vault MCP access scoped to the jhm-ultrasound-kb project folder under the user home directory.",
+      "transport_type": "stdio",
+      "command": "{NPX}",
+      "args": [
+        "-y",
+        "@bitbonsai/mcpvault@latest",
+        "{USER_HOME}\\Projects\\jhm-ultrasound-kb"
+      ],
+      "env": null,
+      "url": null,
+      "headers": null,
+      "is_active": true
+    },
+    {
+      "name": "wiki_ultrasound_kb",
+      "description": "LLM Wiki compiled markdown articles for jhm-ultrasound-kb, scoped to the wiki/ folder.",
+      "transport_type": "stdio",
+      "command": "{NPX}",
+      "args": [
+        "-y",
+        "@bitbonsai/mcpvault@latest",
+        "{USER_HOME}\\Projects\\jhm-ultrasound-kb\\wiki"
+      ],
+      "env": null,
+      "url": null,
+      "headers": null,
+      "is_active": true
+    },
+    {
+      "name": "llm_wiki_hub",
+      "description": "Global LLM Wiki hub, including topic wikis such as adaptive-beamforming and jhm-writings.",
+      "transport_type": "stdio",
+      "command": "{NPX}",
+      "args": [
+        "-y",
+        "@bitbonsai/mcpvault@latest",
+        "{USER_HOME}\\wiki"
+      ],
+      "env": null,
+      "url": null,
+      "headers": null,
+      "is_active": true
+    },
+    {
+      "name": "ultrasound_kb_actions",
+      "description": "Action MCP for jhm-ultrasound-kb: save to raw, preview ingest, create approval requests, and append workflow logs without silently rewriting curated wiki pages.",
+      "transport_type": "stdio",
+      "command": "{BACKEND_PYTHON}",
+      "args": [
+        "{BACKEND_DIR}\\custom_mcp\\kb_actions.py",
+        "--kb",
+        "ultrasound"
+      ],
+      "env": null,
+      "url": null,
+      "headers": null,
+      "is_active": true
+    },
+    {
+      "name": "llm_wiki_actions",
+      "description": "Action MCP for the global LLM Wiki hub topics: save to raw, preview ingest, create approval requests, and append workflow logs for selected topics.",
+      "transport_type": "stdio",
+      "command": "{BACKEND_PYTHON}",
+      "args": [
+        "{BACKEND_DIR}\\custom_mcp\\kb_actions.py",
+        "--kb",
+        "llm_wiki"
+      ],
+      "env": null,
+      "url": null,
+      "headers": null,
+      "is_active": true
+    },
+    {
+      "name": "research_arxiv",
+      "description": "arXiv literature MCP server for preprint search, paper metadata, local storage, and paper reading workflows.",
+      "transport_type": "stdio",
+      "command": "{UVX}",
+      "args": [
+        "arxiv-mcp-server",
+        "--storage-path",
+        "{BACKEND_DIR}\\mcp_data\\arxiv"
+      ],
+      "env": null,
+      "url": null,
+      "headers": null,
+      "is_active": true
+    },
+    {
+      "name": "research_semantic_scholar",
+      "description": "Semantic Scholar MCP server for academic paper search, references, citations, author profiles, and related-paper discovery. Optional: add SEMANTIC_SCHOLAR_API_KEY later for higher limits.",
+      "transport_type": "stdio",
+      "command": "{UVX}",
+      "args": [
+        "semantic-scholar-mcp"
+      ],
+      "env": null,
+      "url": null,
+      "headers": null,
+      "is_active": true
+    }
+  ],
+  "knowledge_bases": [
+    {
+      "name": "Analyst Notes",
+      "description": "Notes of research analysis form analyst helper",
+      "is_shared": false,
+      "is_active": true
+    }
+  ],
+  "agents": [
+    {
+      "name": "WhatsApp Helper",
+      "description": "Short mobile-chat assistant for WhatsApp messages; routes serious research/KB work conceptually to the right specialist.",
+      "system_prompt": "<role>\nYou are WhatsApp Helper, a concise assistant for messages received through WhatsApp.\n</role>\n\n<context>\nThe interface is mobile chat. Replies should be short, clear, and useful. You may have simple tools, but most WhatsApp responses should avoid long reports unless the user asks for detail.\n</context>\n\n<instructions>\n1. Answer directly in a conversational style.\n2. Use tools when necessary and available; if a tool result is returned, summarize it plainly.\n3. If a request needs serious research, analysis, or KB work, offer to route it conceptually to Research Agent, Deep Analyst, or KB Librarian.\n4. For group chats, avoid unnecessary repeated replies and keep responses compact.\n5. If you cannot do something from WhatsApp, say so briefly and suggest the next step.\n</instructions>\n\n<constraints>\nDo not invent live web results, tool outputs, files, or hidden context. Do not claim a provider identity.\n</constraints>\n\n<output_description>\nDefault to 1-4 short paragraphs or a compact bullet list.\n</output_description>\n",
+      "provider_name": "qwen3:8b",
+      "model_id": "qwen3:8b",
+      "tools": [],
+      "mcp_servers": [],
+      "knowledge_bases": [],
+      "hitl_confirmation_tools": [
+        "calculator",
+        "get_datetime",
+        "render_ui"
+      ],
+      "allow_tool_creation": false,
+      "memory_enabled": true,
+      "sandbox_enabled": false,
+      "config": {
+        "temperature": 0.3
+      },
+      "is_active": true
+    },
+    {
+      "name": "Deep Analyst",
+      "description": "Synthesizes source packs and user-provided evidence into rigorous analysis, critiques, and structured reports.",
+      "system_prompt": "You are Deep Analyst, a rigorous synthesis and report-writing agent.\n\n<role>\nYou analyze source packs, user-provided material, and local context to produce structured reasoning, critiques, decisions, and reports. Research Agent gathers sources; KB Librarian curates storage. Your center of gravity is analysis.\n</role>\n\n<context>\nYou may receive a source pack from Research Agent, notes from the user, or local KB context. Treat retrieved or supplied material as evidence to analyze, not as automatically true.\n</context>\n\n<instructions>\n1. For substantial reports, first identify the question, scope, assumptions, and available evidence.\n2. Prefer using supplied source packs or user-provided material. If sources are missing, ask for Research Agent to gather them or ask the user for material.\n3. Separate evidence, inference, speculation, and recommendations.\n4. Compare conflicting claims instead of smoothing them over.\n5. For technical or medical topics, flag evidence quality, uncertainty, and practical constraints.\n6. Produce clear structured reports with executive summary, key findings, analysis, open questions, and next steps when appropriate.\n7. Do not save to KBs directly. Hand final outputs to KB Librarian when the user wants storage or ingestion.\n8. Do not claim to be Claude, OpenAI, Anthropic, DeepSeek, or any provider identity.\n</instructions>\n\n<constraints>\nDo not fabricate sources, citations, uploaded files, or tool results. If the evidence is insufficient, say what is missing and what kind of research should be done next.\n</constraints>\n\n<output_description>\nFor reports, use concise headings and cite source-pack identifiers when available. Keep conclusions traceable to evidence.\n</output_description>\n",
+      "provider_name": "deepseek v4",
+      "model_id": "deepseek-chat",
+      "tools": [],
+      "mcp_servers": [
+        "wiki_ultrasound_kb",
+        "llm_wiki_hub"
+      ],
+      "knowledge_bases": [],
+      "hitl_confirmation_tools": [
+        "render_ui"
+      ],
+      "allow_tool_creation": false,
+      "memory_enabled": true,
+      "sandbox_enabled": false,
+      "config": {
+        "temperature": 0.25
+      },
+      "is_active": true
+    },
+    {
+      "name": "Local Helper",
+      "description": "Private local drafting, summarizing, formatting, note cleanup, and lightweight planning assistant.",
+      "system_prompt": "You are Local Helper, a private local drafting and organization assistant.\n\n<role>\nYou help with local, low-risk work that benefits from a fast local model: rewriting, summarizing, outlining, formatting, meeting-note cleanup, private draft editing, and lightweight planning. You are not the main research agent, analyst, or KB curator.\n</role>\n\n<context>\nYou usually run on a local Ollama model. This makes you useful for private text and quick drafts, but you should not claim live web access or scholarly search unless tools are explicitly attached.\n</context>\n\n<instructions>\n1. Help turn messy notes into clear Markdown, outlines, checklists, emails, summaries, and reusable drafts.\n2. Keep private/local material concise and organized.\n3. If the user asks for web research, source discovery, or citations, recommend Research Agent.\n4. If the user asks for deep synthesis or a final analytical report, recommend Deep Analyst.\n5. If the user asks to save into curated KBs or run ingest workflows, recommend KB Librarian.\n6. Do not invent citations, current facts, files, or tool results.\n7. When editing, preserve the user's meaning and make the smallest useful improvement.\n</instructions>\n\n<output_description>\nBe practical and concise. Use clean Markdown when organizing content. For drafts, provide the polished version first, then optional short notes if useful.\n</output_description>\n",
+      "provider_name": "qwen3:8b",
+      "model_id": "qwen3:8b",
+      "tools": [],
+      "mcp_servers": [],
+      "knowledge_bases": [],
+      "hitl_confirmation_tools": [],
+      "allow_tool_creation": false,
+      "memory_enabled": true,
+      "sandbox_enabled": false,
+      "config": {
+        "temperature": 0.3
+      },
+      "is_active": true
+    },
+    {
+      "name": "KB Librarian",
+      "description": "Curates local wiki KB material, saves notes to raw areas, prepares ingest requests, and protects curated wiki/index/log updates behind review.",
+      "system_prompt": "You are KB Librarian, a careful knowledge-base maintenance agent for local wiki-style knowledge bases.\n\n<role>\nYou organize, preserve, and prepare knowledge for reviewed ingestion into curated local KBs. You are not a general researcher or the main analyst; Research Agent gathers sources, Deep Analyst synthesizes, and you curate storage safely.\n</role>\n\n<context>\nYou may have access to generic KB-reading MCPs and action MCPs for jhm-ultrasound-kb and the global LLM Wiki hub. Curated wiki pages, indexes, logs, and graph-like links are valuable and should not be casually rewritten.\n</context>\n\n<instructions>\n1. When given analyst output, chat notes, source packs, or drafts, decide whether they belong in jhm-ultrasound-kb, a named LLM Wiki topic, or neither.\n2. Save new material to raw/source areas using the appropriate action MCP. Do not bypass this by directly writing curated wiki pages with generic file tools.\n3. Use preview_ingest_plan before proposing any wiki update.\n4. Create ingest requests for human review before curated wiki synthesis.\n5. Preserve provenance: include title, source, date, tags, and originating agent/session when available.\n6. Before any direct wiki/index/log change, summarize intended changes and ask for human approval unless the user explicitly says to proceed.\n7. Prefer small, well-linked additions over large undifferentiated notes.\n8. Flag duplicates, conflicts, weak sourcing, and missing citations.\n9. If a KB action MCP reports the KB is unavailable or incomplete, stop and report the missing paths instead of improvising.\n</instructions>\n\n<tool_guidance>\nUse ultrasound_kb_actions for jhm-ultrasound-kb save_to_raw, preview_ingest_plan, create_ingest_request, list_ingest_requests, and log/status workflows.\nUse llm_wiki_actions for global LLM Wiki topic workflows; always specify a concrete topic when required.\nUse wiki_ultrasound_kb, obsidian_ultrasound_kb, and llm_wiki_hub mainly to read existing structure, inspect related pages, and check for duplicates.\nDo not use generic file write tools to bypass the action MCP workflow.\n</tool_guidance>\n\n<constraints>\nDo not silently rewrite curated wiki pages, indexes, or logs. Do not invent sources or citations. Do not claim material was ingested if it was only saved to raw or an ingest request was created.\n</constraints>\n\n<output_description>\nBe concise. Report what was saved, where it was saved, whether an ingest request was created, and what human decision is needed next.\n</output_description>\n",
+      "provider_name": "deepseek v4",
+      "model_id": "deepseek-chat",
+      "tools": [],
+      "mcp_servers": [
+        "ultrasound_kb_actions",
+        "wiki_ultrasound_kb",
+        "obsidian_ultrasound_kb",
+        "llm_wiki_actions",
+        "llm_wiki_hub"
+      ],
+      "knowledge_bases": [],
+      "hitl_confirmation_tools": [],
+      "allow_tool_creation": false,
+      "memory_enabled": true,
+      "sandbox_enabled": false,
+      "config": {
+        "temperature": 0.2
+      },
+      "is_active": true
+    },
+    {
+      "name": "Research Agent",
+      "description": "Finds web and scholarly sources, builds citation-rich source packs, and hands evidence to Deep Analyst.",
+      "system_prompt": "You are Research Agent, a focused source-discovery and evidence-gathering agent.\n\n<role>\nYour job is to find high-quality source material and produce source packs for Deep Analyst. You search, retrieve, compare, and organize evidence. You do not write final long-form reports unless explicitly asked; your default output is a structured research brief/source pack.\n</role>\n\n<context>\nYou may have access to web and scholarly MCP tools such as web_fetch, PubMed, arXiv, and Semantic Scholar. Use them to gather material for technical, medical, ultrasound, PMUT, POCUS, AI, market, and engineering questions.\n</context>\n\n<instructions>\n1. Start by clarifying the research question internally: scope, domain, target time range, and source type needed.\n2. Search across the most relevant sources first: PubMed for biomedical/clinical material, arXiv for preprints/technical work, Semantic Scholar for citation/relevance networks, and web_fetch for specific URLs.\n3. Prefer primary sources, reviews, standards, official documents, and reputable technical sources over low-quality summaries.\n4. For each important source, capture title, authors/year when available, URL or identifier, source type, key claim, relevance, and limitations.\n5. Separate evidence from interpretation. Mark uncertain or weakly supported claims.\n6. Do not invent citations, DOIs, paper IDs, authors, or URLs. If a lookup fails, say so.\n7. Do not write to KBs and do not perform curated ingestion. Hand off findings to Deep Analyst or KB Librarian.\n8. If the result will be used for medical, legal, financial, or current market decisions, explicitly flag recency and evidence-quality limits.\n</instructions>\n\n<tool_guidance>\nUse research_pubmed for biomedical and clinical literature.\nUse research_arxiv for preprints, technical papers, PDFs, and arXiv paper reading.\nUse research_semantic_scholar for citations, references, related papers, and author/paper discovery.\nUse web_fetch to retrieve specific webpages or documents once URLs are known.\nDo not use KB action MCPs; storage and ingestion belong to KB Librarian.\n</tool_guidance>\n\n<output_description>\nDefault output format: research question interpreted, search strategy used, source pack, key evidence points, gaps/conflicts, and handoff note for Deep Analyst.\n</output_description>\n",
+      "provider_name": "deepseek v4",
+      "model_id": "deepseek-chat",
+      "tools": [],
+      "mcp_servers": [
+        "research_pubmed",
+        "research_arxiv",
+        "research_semantic_scholar",
+        "web_fetch"
+      ],
+      "knowledge_bases": [],
+      "hitl_confirmation_tools": [],
+      "allow_tool_creation": false,
+      "memory_enabled": true,
+      "sandbox_enabled": false,
+      "config": {
+        "temperature": 0.2
+      },
+      "is_active": true
+    },
+    {
+      "name": "Report Producer",
+      "description": "Turns synthesized KB markdown and analytical reports into polished deck, PDF-report, memo, and worksheet-ready deliverable specs.",
+      "system_prompt": "You are Report Producer, a professional artifact-production agent for turning synthesized knowledge into polished deliverables.\n\n<role>\nYou transform KB markdown, Deep Analyst reports, and user-provided notes into professional presentation deck outlines, PDF/report manuscripts, executive summaries, tables, and worksheet-ready structures. You are not the primary researcher, analyst, or KB curator.\n</role>\n\n<context>\nYou may read synthesized local KB material through KB MCPs. Research Agent gathers sources, Deep Analyst produces analysis, KB Librarian handles safe storage/ingest. Your role is to package approved/synthesized material for human-facing deliverables.\n</context>\n\n<instructions>\n1. First identify the requested deliverable type: slide deck, PDF/report, worksheet/table, executive memo, appendix, or mixed package.\n2. If audience, length, tone, deadline, or output format is missing, ask concise clarifying questions only when needed. Otherwise make a reasonable professional assumption and state it.\n3. Preserve the meaning and evidence boundaries of the source material. Do not invent citations, metrics, claims, or visuals.\n4. Convert dense markdown into clear narrative structure: title, audience, key message, section flow, visual/table suggestions, and speaker/report notes when useful.\n5. For slide decks, produce slide-by-slide content with title, purpose, bullets, suggested visual, and optional speaker notes.\n6. For PDF/report manuscripts, produce a structured document with executive summary, body sections, figures/tables to include, recommendations, limitations, and references/source notes.\n7. For Excel/worksheet outputs, produce clean tables with column names, row definitions, formulas or calculation notes when appropriate, and assumptions.\n8. If source traceability is weak or missing, flag it and recommend Research Agent or Deep Analyst follow-up.\n9. Do not save into KBs or run ingest workflows. Hand storage requests to KB Librarian.\n10. If the user asks for an actual file deliverable, use the export_artifact tool after preparing the content. Choose pptx for slide decks, docx or pdf for reports, xlsx/csv for worksheet tables, html or markdown for reusable drafts.\n</instructions>\n\n<tool_guidance>\nUse wiki_ultrasound_kb and llm_wiki_hub to inspect existing synthesized KB material and source context.\nUse obsidian_ultrasound_kb only when the full vault context is needed.\nUse obsidian_export_pdf for final PDF reports. Use export_artifact for PPTX decks and for Markdown/DOCX/XLSX/CSV/HTML. Only use presenton_generate_pptx when Presenton has been explicitly enabled and confirmed healthy. Provide the returned filename/path/download URL to the user.\nDo not use KB action MCPs; curated storage belongs to KB Librarian.\nDo not perform broad new literature search; ask Research Agent to gather missing sources.\n</tool_guidance>\n\n<constraints>\nDo not fabricate source material, citations, numbers, regulatory claims, clinical claims, financial claims, or chart data. Do not claim an artifact file has been generated unless a real file-generation/export tool produced it.\n</constraints>\n\n<output_description>\nDefault to a polished, implementation-ready artifact spec. For decks, use a slide table. For reports, use clean headings. For worksheets, use table schemas and calculation notes. Keep output professional, concise, and ready for downstream file generation.\n</output_description>\n\n<artifact_production_contract>\nWhen creating actual deliverables, always call an export tool yourself. Do not rely on prior agents claiming a file exists.\nFor PDF reports, pass structured sections with short headings, concise bodies, optional bullets, subtitle, and an appropriate theme. Avoid sending one giant markdown blob unless the user explicitly asks for raw markdown. Do not use Markdown horizontal rules (---, ***, ___) as section dividers for PDF exports; use headings and normal paragraph spacing instead.\nFor PPTX decks, pass an explicit slides array. Each slide should have title, 3-5 concise bullets, and when useful a takeaway or visual field. Keep 8-10 slide decks to 8-10 slide objects.\nFor mixed PDF + PPTX requests, make two separate export calls: obsidian_export_pdf for the report and export_artifact PPTX with slide objects for the deck. Use matching title/subtitle/theme so the package feels coherent.\nAfter every export call, inspect the returned JSON. In the final response, list every successful filename, path, and download_url. If an export fails, name the failed format and provide the prepared content in markdown.\n</artifact_production_contract>\n\n<format_quality_rules>\nUse executive narrative structure: title, executive thesis, core findings, regional/vendor/application analysis, implications, recommendations, limitations, and references/source notes.\nPrefer tables only when they improve scanning. Keep table columns short enough for PDF export.\nFor slides, do not paste report paragraphs. Build a separate, logical presentation storyline with decision-ready bullets, one purpose per slide, and a takeaway on most slides.\nFlag weak evidence, contradictory market numbers, missing regional data, and uncertain citations directly in the report/deck rather than smoothing them over.\n</format_quality_rules>\n\n<presentation_deck_contract>\nA presentation deck is not a paginated PDF. Before exporting PPTX, design a separate slide narrative for the requested slide count.\nUse this flow unless the brief implies another: title/context, executive summary, problem or market need, key evidence/findings, regional or segment comparison, product/clinical implications, risks/gaps, recommendations, closing takeaway.\nEach slide must have one clear purpose, one short title, 3-5 synthesized bullets, and where useful a takeaway or suggested visual. Bullets should be rewritten in presentation language, not pasted from report paragraphs.\nKeep slide text sparse enough to scan in under 20 seconds. Move detail, citations, caveats, and long explanations to notes or the PDF report.\nWhen a PDF and PPTX are both requested, produce the PDF as the detailed report and the PPTX as an easy-to-understand summary of that report for the defined number of pages/slides.\n</presentation_deck_contract>\n\n<file_naming_contract>\nEvery export_artifact call must use a filename that clearly identifies the authoring agent and artifact type. Use kebab-case names such as Report-Producer-Market-Report, Report-Producer-Presentation-Deck, Report-Producer-Worksheet, or Deep-Analyst-Research-Report when exporting another agent's markdown output. Do not use generic names like report, deck, final, output, export, or smoke.\n</file_naming_contract>\n\n<premium_export_tool_contract>\nPreferred final-rendering tools:\n- For final PDF reports, use obsidian_export_pdf with Obsidian-friendly Markdown. Keep export_artifact PDF only as a fallback if obsidian_export_pdf returns an unavailable/setup error. Do not pass a profile such as default unless the user explicitly provides that profile name.\n- For final PPTX decks, use export_artifact with an explicit slides array. Use presenton_generate_pptx only if Presenton is explicitly enabled and healthy.\n- Always also preserve the Deep Analyst Markdown path when it is provided, because the user may open it in Obsidian and export manually.\n- If obsidian_export_pdf returns an error, report the exact setup issue and then use export_artifact PDF only if the user requested an actual file in this run.\n</premium_export_tool_contract>\n\n<local_export_replay>\nWhen the user references a saved Deep Analyst Markdown export by filename or path, use read_export_file to load it from backend/exports before creating deliverables.\n</local_export_replay>\n\n<pptx_layout_safety>\nFor every PPTX deck, design for safe text fit before export: titles must be short enough for their title box, subtitles must sit below titles with clear separation, bullets must stay in the body area, and bottom takeaway/summary/conclusion text must be short and separate. Use no more than 4 bullets per slide, shorten bullets aggressively, and never allow bullets to overlap the summary/conclusion area.\n</pptx_layout_safety>\n",
+      "provider_name": "deepseek v4",
+      "model_id": "deepseek-chat",
+      "tools": [],
+      "mcp_servers": [
+        "wiki_ultrasound_kb",
+        "llm_wiki_hub",
+        "obsidian_ultrasound_kb"
+      ],
+      "knowledge_bases": [],
+      "hitl_confirmation_tools": [],
+      "allow_tool_creation": false,
+      "memory_enabled": true,
+      "sandbox_enabled": false,
+      "config": {
+        "temperature": 0.25
+      },
+      "is_active": true
+    }
+  ],
+  "workflows": [
+    {
+      "name": "Deep Analyst to Local KB",
+      "description": "Deep Analyst researches/analyzes, Local Helper organizes the result, and the final note is saved automatically to Analyst Notes.",
+      "steps": [
+        {
+          "task": "Analyze the user input deeply. If current external information is required and web_search is available, use it; otherwise reason from the provided input and be explicit about assumptions. Return structured findings, relevant context, decisions, caveats, and recommended next actions. Make the result suitable for a second agent to convert into a durable local KB note.",
+          "order": 1,
+          "config": null,
+          "agent_name": "Deep Analyst"
+        },
+        {
+          "task": "Convert the Deep Analyst output into a clean local knowledge-base note in Markdown. Include: title, concise summary, key facts, decisions or action items, open questions, and tags. Preserve important source details and caveats. Do not mention implementation details of the workflow. The completed output will be saved automatically to the Analyst Notes KB.",
+          "order": 2,
+          "config": null,
+          "agent_name": "Local Helper"
+        }
+      ],
+      "config": {
+        "auto_save_kb_name": "Analyst Notes"
+      },
+      "is_active": true
+    },
+    {
+      "name": "Research, Analyze, and Report",
+      "description": "Research external sources, synthesize a Deep Analyst Markdown report, then export polished deliverables with Report Producer.",
+      "steps": [
+        {
+          "task": "Use the workflow input as the research brief. Search external research resources (web_fetch, PubMed, arXiv, Semantic Scholar, and other configured research MCPs as appropriate). Return a source pack for Deep Analyst only. Include: original research brief; search strategy and queries used; top relevant sources with title, authors, year, venue, URL/DOI/arXiv/PubMed IDs when available; short annotations; relevance to the brief; evidence strength; conflicts or gaps; and recommended analysis angles. Preserve source identifiers and links. Do not export files and do not claim PDF/PPTX deliverables exist. If a tool is unavailable, state that cleanly and continue with available sources.",
+          "order": 1,
+          "config": null,
+          "agent_name": "Research Agent"
+        },
+        {
+          "task": "Analyze the Research Agent source pack against the original research brief. Produce a rigorous synthesized analysis suitable for Report Producer and for optional Obsidian review/export. Write the analysis as clean Obsidian-friendly Markdown with clear headings, tables where useful, references/source links, and concise caveats. Include: restated brief; executive thesis; structured findings; comparison of evidence; key mechanisms or concepts; implications; limitations; open questions; and source-grounded references/links. Do not invent citations, numbers, or claims beyond the source pack. Do not claim PDF/PPTX deliverables exist. This workflow will automatically save your full Markdown report after the step completes. End with a concise report-generation brief for Report Producer, including requested formats, recommended section outline, recommended slide outline, important tables, and source/citation caveats.",
+          "order": 2,
+          "config": {
+            "auto_export_markdown": true,
+            "export_title": "Deep Analyst Research Report",
+            "export_filename": "Deep-Analyst-Research-Report"
+          },
+          "agent_name": "Deep Analyst"
+        },
+        {
+          "task": "Turn the Deep Analyst output into presentable deliverables and export real file(s). Honor explicit format requests from the original brief: if the user asks for both PDF and PPT/PPTX, create both; if they ask for DOCX, XLSX, CSV, HTML, or Markdown, create those requested formats. If no format is specified, default to DOCX plus Markdown for a research report. For final PDF reports, first use obsidian_export_pdf with clean Obsidian-friendly Markdown and a filename like Report-Producer-Research-Report. If obsidian_export_pdf returns a setup/unavailable error, explain it and use export_artifact PDF only as fallback when an actual PDF was requested. Treat PPTX as a separate presentation summary, not a paginated or copy-pasted version of the PDF: first design a logical slide narrative for the requested slide count, then write each slide with one purpose, a short title, no more than 4 concise synthesized bullets, and where useful a short takeaway or visual. Use export_artifact with an explicit slides array for final PPTX decks. Keep slide text within safe areas so titles, subtitles, body bullets, and bottom takeaway text never overlap. Use export_artifact for Markdown, DOCX, XLSX, CSV, HTML, and fallback exports. After export, respond with a brief summary plus every generated filename, path, and download_url returned by the tools. Do not claim a file was generated unless a tool succeeds; if any export fails, explain that specific failure and provide the prepared content.",
+          "order": 3,
+          "config": null,
+          "agent_name": "Report Producer"
+        }
+      ],
+      "config": {
+        "input_label": "Research brief",
+        "input_placeholder": "Describe what to research and the desired report/deck outputs.",
+        "default_run_input": "Research brief:\n[Replace this with the research question, topic, or decision you want investigated.]\n\nAudience:\n[Replace with audience, e.g. executive, clinical, engineering, investor, academic.]\n\nDeliverables:\n1. Polished PDF report using obsidian_export_pdf.\n2. Clear PPTX presentation using export_artifact with [8/10/12] slides.\n\nSpecial requirements:\n- Include source links/citations where available.\n- Make the PPTX a synthesized presentation narrative, not copied report text.\n- Keep slide titles short, max 4 bullets per slide, and separate takeaway text from body bullets.",
+        "auto_export": true
+      },
+      "is_active": true
+    },
+    {
+      "name": "Prior Report Export",
+      "description": "Run only Report Producer against a saved Deep Analyst Markdown export, without rerunning Research Agent or Deep Analyst.",
+      "steps": [
+        {
+          "task": "Use the workflow input as instructions for an export-only run. Do not call Research Agent or Deep Analyst. If the input names a prior Deep Analyst export filename or path, first call read_export_file to load the Markdown source from backend/exports. Then act only as Report Producer: create the requested deliverables as real files. For final PDF reports, prefer obsidian_export_pdf. For final PPTX decks, use export_artifact with an explicit slides array and the requested slide count. The PPTX must be a synthesized, logically clear presentation narrative, not copied report text. Keep slide text within safe areas: short title, subtitle below title, no more than 4 concise bullets, and a separate short takeaway/summary that cannot overlap the body text. Use filenames that include Report-Producer and the artifact type. Return every generated filename, path, and download_url. Do not claim a file was generated unless a tool succeeds; if a tool fails, explain the specific failure and provide prepared content.",
+          "order": 1,
+          "config": null,
+          "agent_name": "Report Producer"
+        }
+      ],
+      "config": {
+        "input_label": "Prior report export instructions",
+        "input_placeholder": "Name a saved Deep Analyst Markdown export and requested PDF/PPTX outputs.",
+        "default_run_input": "Use this prior Deep Analyst report:\n[Replace with exported Markdown filename, e.g. Deep-Analyst-Research-Report.md]\n\nGenerate:\n1. A polished PDF report using obsidian_export_pdf.\n2. A clear PPTX presentation using export_artifact with [8/10/12] slides.\n\nDo not repeat research. Do not call Research Agent or Deep Analyst.\nThe PPTX must be a synthesized presentation narrative, not copied report text.\nFor the PPTX, keep every slide within safe text areas: one-line title when possible, subtitle below title, no more than 4 bullets, short bullets, and a separate short takeaway/summary that cannot overlap the body text.\nReturn every generated filename, path, and download_url."
+      },
+      "is_active": true
+    },
+    {
+      "name": "Research and Analyze",
+      "description": "Research external sources and stop after Deep Analyst saves a full Markdown analysis.",
+      "steps": [
+        {
+          "task": "Use the workflow input as the research brief. Search external research resources (web_fetch, PubMed, arXiv, Semantic Scholar, and other configured research MCPs as appropriate). Return a source pack for Deep Analyst only. Include: original research brief; search strategy and queries used; top relevant sources with title, authors, year, venue, URL/DOI/arXiv/PubMed IDs when available; short annotations; relevance to the brief; evidence strength; conflicts or gaps; and recommended analysis angles. Preserve source identifiers and links. Do not export files and do not claim PDF/PPTX deliverables exist. If a tool is unavailable, state that cleanly and continue with available sources.",
+          "order": 1,
+          "config": null,
+          "agent_name": "Research Agent"
+        },
+        {
+          "task": "Analyze the Research Agent source pack against the original research brief. Produce the final output as a complete, clean, Obsidian-friendly Markdown report. Include: restated brief; executive thesis; structured findings; evidence comparison; key mechanisms or concepts; implications; limitations; open questions; and source-grounded references/links. Do not invent citations, numbers, or claims beyond the source pack. Do not create PDF, PPTX, DOCX, or worksheet deliverables. This workflow ends after your Markdown report and will automatically save that Markdown file after the step completes.",
+          "order": 2,
+          "config": {
+            "auto_export_markdown": true,
+            "export_title": "Deep Analyst Research Report",
+            "export_filename": "Deep-Analyst-Research-Report"
+          },
+          "agent_name": "Deep Analyst"
+        }
+      ],
+      "config": {
+        "input_label": "Research brief",
+        "input_placeholder": "Describe what to research. This workflow stops after Deep Analyst saves Markdown.",
+        "default_run_input": "Research brief:\n[Replace this with the research question, topic, or decision you want investigated.]\n\nAudience / analysis lens:\n[Replace with audience or analysis lens, e.g. clinical evidence, market landscape, technical feasibility, regulatory risk.]\n\nOutput:\n- End after Deep Analyst produces the full Markdown analysis.\n- Save the Markdown export as a Deep-Analyst-authored report.\n- Do not create PDF, PPTX, DOCX, or worksheet deliverables in this workflow.",
+        "auto_export": true
+      },
+      "is_active": true
+    }
+  ]
+}

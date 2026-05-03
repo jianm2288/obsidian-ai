@@ -46,6 +46,7 @@ from routers.sandbox_router import router as sandbox_router
 from routers.analytics_router import router as analytics_router
 from routers.whatsapp_router import router as whatsapp_router
 from routers.prompt_vault_router import router as prompt_vault_router
+from routers.exports_router import router as exports_router
 
 if DATABASE_TYPE == "mongo":
     from database_mongo import connect_to_mongo, close_mongo_connection, get_database
@@ -871,6 +872,12 @@ async def lifespan(app: FastAPI):
     if DATABASE_TYPE == "sqlite":
         Base.metadata.create_all(bind=engine)
         _run_sqlite_migrations(engine)
+        try:
+            from bootstrap_workspace import sync_default_workspace_sqlite
+
+            sync_default_workspace_sqlite()
+        except Exception as exc:
+            logger.warning("Default workspace sync skipped: %s", exc)
         import sqlalchemy
         with engine.connect() as conn:
             # Auto-deny any HITL approvals left pending from a previous server run
@@ -999,6 +1006,7 @@ app.include_router(sandbox_router)
 app.include_router(analytics_router)
 app.include_router(whatsapp_router)
 app.include_router(prompt_vault_router)
+app.include_router(exports_router)
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)

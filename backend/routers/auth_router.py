@@ -1,4 +1,5 @@
 from datetime import timedelta
+import logging
 
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from sqlalchemy.orm import Session
@@ -17,6 +18,7 @@ if DATABASE_TYPE == "mongo":
     from database_mongo import get_database
     from models_mongo import UserCollection
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 
@@ -85,6 +87,13 @@ async def register(request: EncryptedRequest, db: Session = Depends(get_db)):
     db.add(db_user)
     db.commit()
     db.refresh(db_user)
+
+    try:
+        from bootstrap_workspace import sync_default_workspace_sqlite
+
+        sync_default_workspace_sqlite(db=db, user_id=db_user.id)
+    except Exception as exc:
+        logger.warning("Default workspace sync skipped for new user %s: %s", db_user.id, exc)
 
     return UserResponse(id=str(db_user.id), username=db_user.username, email=db_user.email, role=db_user.role)
 

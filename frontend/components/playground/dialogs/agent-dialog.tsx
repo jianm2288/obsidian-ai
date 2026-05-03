@@ -244,6 +244,7 @@ export function AgentDialog({ open, onOpenChange, agent, onSaved }: AgentDialogP
   const [acceptingOpt, setAcceptingOpt] = useState(false)
   const [rejectingOpt, setRejectingOpt] = useState(false)
   const [optPollTimer, setOptPollTimer] = useState<ReturnType<typeof setInterval> | null>(null)
+  const [optimizerError, setOptimizerError] = useState("")
   const [evalSuites, setEvalSuites] = useState<EvalSuite[]>([])
   const [selectedEvalSuiteId, setSelectedEvalSuiteId] = useState<string>("none")
   // Prompt vault state
@@ -551,18 +552,19 @@ export function AgentDialog({ open, onOpenChange, agent, onSaved }: AgentDialogP
   const handleTriggerOptimization = async () => {
     if (!agent) return
     setTriggeringOpt(true)
+    setOptimizerError("")
     try {
       const run = await apiClient.triggerOptimization({
         agent_id: String(agent.id),
         eval_suite_id: selectedEvalSuiteId && selectedEvalSuiteId !== "none" ? selectedEvalSuiteId : undefined,
-        min_traces: 5,
+        min_traces: 1,
         max_traces: 50,
       })
       setOptimizationRuns((prev) => [run, ...prev])
       setActiveOptRun(run)
       _startOptPoll(String(run.id))
-    } catch {
-      // ignore
+    } catch (err: unknown) {
+      setOptimizerError(err instanceof Error ? err.message : "Failed to start optimizer")
     } finally {
       setTriggeringOpt(false)
     }
@@ -1279,6 +1281,9 @@ export function AgentDialog({ open, onOpenChange, agent, onSaved }: AgentDialogP
                   <p className="text-xs text-muted-foreground -mt-1">
                     Analyzes recent conversation traces to identify failure patterns and proposes an improved system prompt.
                   </p>
+                  {optimizerError && (
+                    <p className="text-xs text-destructive">{optimizerError}</p>
+                  )}
 
                   {/* Trigger controls */}
                   <div className="flex items-center gap-2">
@@ -1296,6 +1301,11 @@ export function AgentDialog({ open, onOpenChange, agent, onSaved }: AgentDialogP
                             {s.name}
                           </SelectItem>
                         ))}
+                        {evalSuites.length === 0 && (
+                          <SelectItem value="no-suites" disabled>
+                            No eval suites configured
+                          </SelectItem>
+                        )}
                       </SelectContent>
                     </Select>
                     <Button
@@ -1341,7 +1351,7 @@ export function AgentDialog({ open, onOpenChange, agent, onSaved }: AgentDialogP
                           )}
                         </div>
                         <div className="flex items-center gap-2">
-                          {activeOptRun.baseline_score !== undefined && activeOptRun.proposed_score !== undefined && (
+                          {typeof activeOptRun.baseline_score === "number" && typeof activeOptRun.proposed_score === "number" && (
                             <span className="text-xs text-muted-foreground">
                               baseline&nbsp;<strong>{Math.round(activeOptRun.baseline_score * 100)}%</strong>
                               &nbsp;→&nbsp;proposed&nbsp;

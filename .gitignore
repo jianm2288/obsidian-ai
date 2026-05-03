@@ -1,5 +1,9 @@
 node_modules
+.npm-cache/
+.seed-test-*/
+.codex-run/*.log
 package-lock.json
+app_data/
 wa-bridge/auth/
 wa-bridge/node_modules/
 .env
@@ -19,3 +23,5 @@ channel*
 uploads/*
 backend/uploads/
 backend/rag_indexes/
+backend/mcp_data/
+backend/exports/

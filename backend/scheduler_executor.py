@@ -9,12 +9,30 @@ import json
 import logging
 import os
 import time
+import asyncio
 from datetime import datetime, timezone
 from workflow_autosave import auto_save_workflow_output_sqlite
+from builtin_tools import BUILTIN_TOOL_SCHEMAS, execute_builtin_tool, is_builtin_tool
 
 logger = logging.getLogger(__name__)
 
 DATABASE_TYPE = os.getenv("DATABASE_TYPE", "sqlite")
+MCP_CONNECT_TIMEOUT_SECONDS = 20
+
+
+def _brief_exception(exc: BaseException) -> str:
+    if isinstance(exc, BaseExceptionGroup):
+        parts = [_brief_exception(e) for e in exc.exceptions[:3]]
+        suffix = "" if len(exc.exceptions) <= 3 else f" (+{len(exc.exceptions) - 3} more)"
+        return f"{type(exc).__name__}: {'; '.join(parts)}{suffix}"
+    return f"{type(exc).__name__}: {exc}"
+
+
+async def _close_mcp_stack(stack) -> None:
+    try:
+        await stack.aclose()
+    except BaseException as e:
+        logger.warning("MCP cleanup failed: %s", _brief_exception(e))
 
 
 async def run_scheduled_workflow_sqlite(schedule_id: int):
@@ -136,7 +154,7 @@ async def run_scheduled_workflow_sqlite(schedule_id: int):
             )
 
             # Build tools
-            tools = None
+            tools = list(BUILTIN_TOOL_SCHEMAS)
             if agent.tools_json:
                 try:
                     tool_ids = json.loads(agent.tools_json)
@@ -146,14 +164,15 @@ async def run_scheduled_workflow_sqlite(schedule_id: int):
                             ToolDefinition.is_active == True,
                         ).all()
                         if tool_defs:
-                            tools = []
+                            builtin_names = {t["function"]["name"] for t in BUILTIN_TOOL_SCHEMAS}
                             for td in tool_defs:
+                                if td.name in builtin_names:
+                                    continue
                                 try:
                                     params = json.loads(td.parameters_json) if td.parameters_json else {"type": "object", "properties": {}}
                                 except Exception:
                                     params = {"type": "object", "properties": {}}
                                 tools.append({"type": "function", "function": {"name": td.name, "description": td.description or "", "parameters": params}})
-                            tools = tools or None
                 except Exception:
                     pass
 
@@ -330,7 +349,7 @@ async def _run_scheduled_dag_sqlite(schedule, workflow, steps, step_results_list
             config=config,
         )
 
-        tools = None
+        tools = list(BUILTIN_TOOL_SCHEMAS)
         if agent.tools_json:
             try:
                 tool_ids = json.loads(agent.tools_json)
@@ -339,7 +358,11 @@ async def _run_scheduled_dag_sqlite(schedule, workflow, steps, step_results_list
                         ToolDefinition.id.in_(tool_ids), ToolDefinition.is_active == True,
                     ).all()
                     if tool_defs:
-                        tools = [{"type": "function", "function": {"name": td.name, "description": td.description or "", "parameters": json.loads(td.parameters_json) if td.parameters_json else {}}} for td in tool_defs]
+                        builtin_names = {t["function"]["name"] for t in BUILTIN_TOOL_SCHEMAS}
+                        for td in tool_defs:
+                            if td.name in builtin_names:
+                                continue
+                            tools.append({"type": "function", "function": {"name": td.name, "description": td.description or "", "parameters": json.loads(td.parameters_json) if td.parameters_json else {}}})
             except Exception:
                 pass
 
@@ -428,16 +451,25 @@ async def _chat_non_streaming(llm, messages, system_prompt, tools, mcp_configs, 
 
     if mcp_configs:
         from mcp_client import connect_mcp_server, parse_mcp_tool_name
-        async with AsyncExitStack() as stack:
+        stack = AsyncExitStack()
+        await stack.__aenter__()
+        try:
             mcp_connections = {}
             all_mcp_tools = []
             for config in mcp_configs:
                 try:
-                    conn = await stack.enter_async_context(connect_mcp_server(config))
+                    conn = await asyncio.wait_for(
+                        stack.enter_async_context(connect_mcp_server(config)),
+                        timeout=MCP_CONNECT_TIMEOUT_SECONDS,
+                    )
                     mcp_connections[conn.server_name] = conn
                     all_mcp_tools.extend(conn.tools)
-                except Exception as e:
-                    logger.warning(f"MCP server {config.get('name')} connection failed: {e}")
+                except BaseException as e:
+                    logger.warning(
+                        "MCP server %s connection failed: %s",
+                        config.get("name"),
+                        _brief_exception(e),
+                    )
 
             merged = list(tools or []) + all_mcp_tools or None
             chat_messages = list(messages)
@@ -460,11 +492,15 @@ async def _chat_non_streaming(llm, messages, system_prompt, tools, mcp_configs, 
                             result = await conn.call_tool(orig_name, args)
                         else:
                             result = json.dumps({"error": f"MCP server '{server_name}' not connected"})
+                    elif is_builtin_tool(tc.name):
+                        result = await execute_builtin_tool(tc.name, tc.arguments)
                     else:
-                        result = _execute_tool_sqlite(tc.name, tc.arguments, db)
+                            result = _execute_tool_sqlite(tc.name, tc.arguments, db)
                     chat_messages.append(LLMMessage(role="user", content=f"[Tool '{tc.name}' returned: {result}]\n\n{TOOL_RESULT_PROMPT}"))
             final = await llm.chat(chat_messages, system_prompt=system_prompt)
             return final.content or ""
+        finally:
+            await _close_mcp_stack(stack)
     else:
         chat_messages = list(messages)
         for _ in range(MAX_ROUNDS):
@@ -473,7 +509,10 @@ async def _chat_non_streaming(llm, messages, system_prompt, tools, mcp_configs, 
                 return response.content or ""
             chat_messages.append(LLMMessage(role="assistant", content=response.content or ""))
             for tc in response.tool_calls:
-                result = _execute_tool_sqlite(tc.name, tc.arguments, db)
+                if is_builtin_tool(tc.name):
+                    result = await execute_builtin_tool(tc.name, tc.arguments)
+                else:
+                    result = _execute_tool_sqlite(tc.name, tc.arguments, db)
                 chat_messages.append(LLMMessage(role="user", content=f"[Tool '{tc.name}' returned: {result}]\n\n{TOOL_RESULT_PROMPT}"))
         final = await llm.chat(chat_messages, system_prompt=system_prompt)
         return final.content or ""
@@ -629,16 +668,18 @@ async def run_scheduled_workflow_mongo(schedule_id: str):
             )
 
             # Build tools
-            tools = None
+            tools = list(BUILTIN_TOOL_SCHEMAS)
             tools_raw = agent.get("tools_json") or agent.get("tools")
             if tools_raw:
                 try:
                     tool_ids = json.loads(tools_raw) if isinstance(tools_raw, str) else tools_raw
                     if tool_ids:
-                        tool_list = []
+                        builtin_names = {t["function"]["name"] for t in BUILTIN_TOOL_SCHEMAS}
                         for tid in tool_ids:
                             td = await ToolDefinitionCollection.find_by_id(mongo_db, str(tid))
                             if not td or not td.get("is_active", True):
+                                continue
+                            if td.get("name", "") in builtin_names:
                                 continue
                             params = td.get("parameters_json") or td.get("parameters")
                             if isinstance(params, str):
@@ -650,8 +691,7 @@ async def run_scheduled_workflow_mongo(schedule_id: str):
                                 parameters = params
                             else:
                                 parameters = {"type": "object", "properties": {}}
-                            tool_list.append({"type": "function", "function": {"name": td.get("name", ""), "description": td.get("description", ""), "parameters": parameters}})
-                        tools = tool_list or None
+                            tools.append({"type": "function", "function": {"name": td.get("name", ""), "description": td.get("description", ""), "parameters": parameters}})
                 except Exception:
                     pass
 
@@ -767,6 +807,8 @@ async def _chat_non_streaming_mongo(llm, messages, system_prompt, tools, mcp_con
     TOOL_RESULT_PROMPT = "Use this information to answer the user's question."
 
     async def exec_tool(tc_name, tc_arguments):
+        if is_builtin_tool(tc_name):
+            return await execute_builtin_tool(tc_name, tc_arguments)
         from mcp_client import parse_mcp_tool_name
         parsed = parse_mcp_tool_name(tc_name)
         if parsed and mcp_connections:
@@ -826,13 +868,20 @@ async def _chat_non_streaming_mongo(llm, messages, system_prompt, tools, mcp_con
         await stack.__aenter__()
         for config in mcp_configs:
             try:
-                conn = await stack.enter_async_context(connect_mcp_server(config))
+                conn = await asyncio.wait_for(
+                    stack.enter_async_context(connect_mcp_server(config)),
+                    timeout=MCP_CONNECT_TIMEOUT_SECONDS,
+                )
                 mcp_connections[conn.server_name] = conn
                 if tools is None:
                     tools = []
                 tools = list(tools) + conn.tools
-            except Exception as e:
-                logger.warning(f"MCP server {config.get('name')} connection failed: {e}")
+            except BaseException as e:
+                logger.warning(
+                    "MCP server %s connection failed: %s",
+                    config.get("name"),
+                    _brief_exception(e),
+                )
 
     try:
         chat_messages = list(messages)
@@ -849,6 +898,6 @@ async def _chat_non_streaming_mongo(llm, messages, system_prompt, tools, mcp_con
     finally:
         if mcp_configs and mcp_connections:
             try:
-                await stack.__aexit__(None, None, None)
+                await _close_mcp_stack(stack)
             except Exception:
                 pass

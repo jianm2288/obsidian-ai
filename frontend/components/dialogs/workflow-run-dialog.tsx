@@ -49,6 +49,31 @@ function generateRunId(): string {
   return `${a}-${b}-${n}`
 }
 
+const REPORT_PRODUCER_REPLAY_DEFAULT = `Use this prior Deep Analyst report:
+[Replace with exported Markdown filename, e.g. Deep-Analyst-Research-Report.md]
+
+Generate:
+1. A polished PDF report using obsidian_export_pdf.
+2. A clear PPTX presentation using export_artifact with [8/10/12] slides.
+
+Do not repeat research. Do not call Research Agent or Deep Analyst.
+The PPTX must be a synthesized presentation narrative, not copied report text.
+For the PPTX, keep every slide within safe text areas: one-line title when possible, subtitle below title, no more than 4 bullets, short bullets, and a separate short takeaway/summary that cannot overlap the body text.
+Return every generated filename, path, and download_url.`
+
+function getDefaultRunInput(workflow: Workflow): string {
+  const configured = workflow.config?.default_run_input
+  if (typeof configured === "string" && configured.trim()) {
+    return configured
+  }
+
+  if (workflow.name === "Prior Report Export") {
+    return REPORT_PRODUCER_REPLAY_DEFAULT
+  }
+
+  return ""
+}
+
 export function WorkflowRunDialog({
   open,
   onOpenChange,
@@ -69,7 +94,7 @@ export function WorkflowRunDialog({
   const abortRef = useRef<AbortController | null>(null)
   const outputRef = useRef<HTMLDivElement>(null)
   const [currentRunLabel] = useState(generateRunId)
-  const [runInput, setRunInput] = useState("")
+  const [runInput, setRunInput] = useState<string | null>(null)
 
   useEffect(() => {
     if (outputRef.current) {
@@ -99,12 +124,13 @@ export function WorkflowRunDialog({
     setError(null)
     setStatus("idle")
     setExpandedOutputs(new Set())
+    setRunInput(null)
   }
 
   const handleRun = async () => {
     if (!session?.accessToken || !workflow || isRunning) return
 
-    const workflowInput = runInput.trim()
+    const workflowInput = (runInput ?? getDefaultRunInput(workflow)).trim()
     if (!workflowInput) {
       setError("Enter workflow input before running.")
       return
@@ -191,6 +217,7 @@ export function WorkflowRunDialog({
   if (!workflow) return null
 
   const sortedSteps = [...workflow.steps].sort((a, b) => a.order - b.order)
+  const effectiveRunInput = runInput ?? getDefaultRunInput(workflow)
 
   const getStepName = (step: typeof sortedSteps[0]) => {
     if (step.node_type && step.node_type !== "agent") {
@@ -231,7 +258,7 @@ export function WorkflowRunDialog({
               {currentRunLabel}
             </span>
             {status === "idle" && (
-              <Button onClick={handleRun} disabled={isRunning || !runInput.trim()} className="gap-2 h-8 px-4 text-xs font-mono">
+              <Button onClick={handleRun} disabled={isRunning || !effectiveRunInput.trim()} className="gap-2 h-8 px-4 text-xs font-mono">
                 <Play className="h-3.5 w-3.5" />
                 RUN
               </Button>
@@ -333,7 +360,7 @@ export function WorkflowRunDialog({
                   </p>
                 </div>
                 <Textarea
-                  value={runInput}
+                  value={effectiveRunInput}
                   onChange={(event) => {
                     setRunInput(event.target.value)
                     if (error) setError(null)
@@ -349,7 +376,7 @@ export function WorkflowRunDialog({
                 <div className="flex items-center gap-2 text-[11px] text-muted-foreground/60 font-mono border border-border rounded-md px-3 py-1.5 bg-muted/20">
                   Run ID: {currentRunLabel}
                 </div>
-                <Button onClick={handleRun} disabled={isRunning || !runInput.trim()} className="gap-2 mt-2">
+                <Button onClick={handleRun} disabled={isRunning || !effectiveRunInput.trim()} className="gap-2 mt-2">
                   <Play className="h-4 w-4" />
                   Run Workflow
                 </Button>

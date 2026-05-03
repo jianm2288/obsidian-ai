@@ -176,6 +176,29 @@ def _build_eval_context_text(eval_runs: list[dict]) -> str:
     return "\n".join(parts)
 
 
+def _extract_json_text(text: str) -> str:
+    """Extract the first JSON object/array from a model response."""
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.split("```", 2)[1]
+        if cleaned.startswith("json"):
+            cleaned = cleaned[4:]
+        cleaned = cleaned.rsplit("```", 1)[0].strip()
+    if cleaned.startswith("{") or cleaned.startswith("["):
+        return cleaned
+
+    starts = [idx for idx in (cleaned.find("{"), cleaned.find("[")) if idx != -1]
+    if not starts:
+        return cleaned
+    start = min(starts)
+    open_char = cleaned[start]
+    close_char = "}" if open_char == "{" else "]"
+    end = cleaned.rfind(close_char)
+    if end == -1 or end <= start:
+        return cleaned
+    return cleaned[start:end + 1].strip()
+
+
 def _create_provider_from_record(provider_record, agent_model_id: str | None = None):
     """Create an LLM provider from either a SQLAlchemy ORM object or a Mongo dict.
 
@@ -270,14 +293,12 @@ async def _call_llm_json(provider_record, system: str, user: str, agent_model_id
     async for chunk in provider.chat_stream(messages=messages, system_prompt=system):
         if chunk.type == "content":
             response_text += chunk.content
-    # Strip possible markdown fences
-    cleaned = response_text.strip()
-    if cleaned.startswith("```"):
-        cleaned = cleaned.split("```", 2)[1]
-        if cleaned.startswith("json"):
-            cleaned = cleaned[4:]
-        cleaned = cleaned.rsplit("```", 1)[0].strip()
-    return json.loads(cleaned)
+    cleaned = _extract_json_text(response_text)
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError as exc:
+        preview = _truncate(response_text.replace("\n", " "), 400)
+        raise ValueError(f"Could not parse optimizer JSON response: {exc}. Response preview: {preview}") from exc
 
 
 # ─── SQLite pipeline ─────────────────────────────────────────────────────────
@@ -328,7 +349,8 @@ async def _run_optimization_sqlite(
         _update(run_id, status="analyzing")
 
         sessions = db.query(ChatSession).filter(
-            ChatSession.agent_id == agent_id,
+            ChatSession.entity_type == "agent",
+            ChatSession.entity_id == agent_id,
             ChatSession.user_id == user_id,
         ).order_by(ChatSession.created_at.desc()).limit(max_traces).all()
 

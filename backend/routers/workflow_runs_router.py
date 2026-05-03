@@ -1,6 +1,7 @@
 import json
 import logging
 import time
+import asyncio
 from contextlib import AsyncExitStack
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException
@@ -20,6 +21,7 @@ from llm.base import LLMMessage
 from llm.provider_factory import create_provider_from_config
 from mcp_client import connect_mcp_server, parse_mcp_tool_name, MCPConnection
 from workflow_autosave import auto_save_workflow_output_sqlite
+from builtin_tools import BUILTIN_TOOL_SCHEMAS, execute_builtin_tool, is_builtin_tool
 
 if DATABASE_TYPE == "mongo":
     from database_mongo import get_database
@@ -34,6 +36,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["workflow-runs"])
 
 MAX_TOOL_ROUNDS = 10
+MCP_CONNECT_TIMEOUT_SECONDS = 20
 
 TOOL_RESULT_PROMPT = (
     "Use this information to answer the user's question."
@@ -157,21 +160,24 @@ async def _execute_tool_mongo(tool_name: str, arguments_str: str, mongo_db) -> s
 
 
 def _build_tools(agent, db):
+    tools = list(BUILTIN_TOOL_SCHEMAS)
     if not agent.tools_json:
-        return None
+        return tools
     try:
         tool_ids = json.loads(agent.tools_json)
     except (json.JSONDecodeError, TypeError):
-        return None
+        return tools
     if not tool_ids:
-        return None
+        return tools
     tool_defs = db.query(ToolDefinition).filter(
         ToolDefinition.id.in_(tool_ids), ToolDefinition.is_active == True,
     ).all()
     if not tool_defs:
-        return None
-    tools = []
+        return tools
+    builtin_names = {t["function"]["name"] for t in BUILTIN_TOOL_SCHEMAS}
     for td in tool_defs:
+        if td.name in builtin_names:
+            continue
         try:
             parameters = json.loads(td.parameters_json) if td.parameters_json else {"type": "object", "properties": {}}
         except json.JSONDecodeError:
@@ -181,24 +187,27 @@ def _build_tools(agent, db):
 
 
 async def _build_tools_mongo(agent, mongo_db):
+    tools = list(BUILTIN_TOOL_SCHEMAS)
     tools_raw = agent.get("tools_json") or agent.get("tools")
     if not tools_raw:
-        return None
+        return tools
     if isinstance(tools_raw, str):
         try:
             tool_ids = json.loads(tools_raw)
         except (json.JSONDecodeError, TypeError):
-            return None
+            return tools
     elif isinstance(tools_raw, list):
         tool_ids = tools_raw
     else:
-        return None
+        return tools
     if not tool_ids:
-        return None
-    tools = []
+        return tools
+    builtin_names = {t["function"]["name"] for t in BUILTIN_TOOL_SCHEMAS}
     for tid in tool_ids:
         td = await ToolDefinitionCollection.find_by_id(mongo_db, str(tid))
         if not td or not td.get("is_active", True):
+            continue
+        if td.get("name", "") in builtin_names:
             continue
         params = td.get("parameters_json") or td.get("parameters")
         if isinstance(params, str):
@@ -262,15 +271,118 @@ async def _connect_mcp_servers(stack, mcp_server_configs):
     all_mcp_tools = []
     for config in mcp_server_configs:
         try:
-            conn = await stack.enter_async_context(connect_mcp_server(config))
+            conn = await asyncio.wait_for(
+                stack.enter_async_context(connect_mcp_server(config)),
+                timeout=MCP_CONNECT_TIMEOUT_SECONDS,
+            )
             mcp_connections[conn.server_name] = conn
             all_mcp_tools.extend(conn.tools)
-        except Exception as e:
-            logger.warning(f"Failed to connect to MCP server {config.get('name')}: {e}")
+        except BaseException as e:
+            logger.warning(
+                "Failed to connect to MCP server %s: %s",
+                config.get("name"),
+                _brief_exception(e),
+            )
     return mcp_connections, all_mcp_tools
 
 
+def _brief_exception(exc: BaseException) -> str:
+    if isinstance(exc, BaseExceptionGroup):
+        parts = [_brief_exception(e) for e in exc.exceptions[:3]]
+        suffix = "" if len(exc.exceptions) <= 3 else f" (+{len(exc.exceptions) - 3} more)"
+        return f"{type(exc).__name__}: {'; '.join(parts)}{suffix}"
+    return f"{type(exc).__name__}: {exc}"
+
+
+def _fallback_output_from_tool_results(tool_results: list[tuple[str, str]]) -> str:
+    """Return a useful final message when a model only calls tools and stays silent."""
+    if not tool_results:
+        return ""
+
+    exported = []
+    errors = []
+    for tool_name, raw in tool_results:
+        try:
+            data = json.loads(raw)
+        except Exception:
+            data = None
+        if tool_name == "export_artifact" and isinstance(data, dict):
+            if data.get("ok"):
+                exported.append(data)
+            else:
+                errors.append(data.get("error") or raw)
+        elif isinstance(data, dict) and data.get("error"):
+            errors.append(f"{tool_name}: {data['error']}")
+
+    parts = []
+    if exported:
+        parts.append("Generated export file(s):")
+        for item in exported:
+            parts.append(
+                "- {filename} ({format})\n  path: {path}\n  download_url: {download_url}".format(
+                    filename=item.get("filename", "artifact"),
+                    format=item.get("format", "file"),
+                    path=item.get("path", ""),
+                    download_url=item.get("download_url", ""),
+                )
+            )
+    if errors:
+        parts.append("Tool issue(s):")
+        parts.extend(f"- {err}" for err in errors)
+    return "\n".join(parts)
+
+
+async def _maybe_export_step_markdown(step_def: dict, step_output: str, default_title: str) -> dict | None:
+    """Optionally persist an intermediate workflow step as a Markdown export."""
+    config = step_def.get("config") or {}
+    if not isinstance(config, dict) or not config.get("auto_export_markdown"):
+        return None
+    if not step_output or not step_output.strip():
+        return None
+
+    title = str(config.get("export_title") or default_title).strip() or default_title
+    filename = config.get("export_filename")
+    args = {
+        "title": title,
+        "format": "markdown",
+        "content_markdown": step_output,
+    }
+    if filename:
+        args["filename"] = str(filename)
+
+    raw = await execute_builtin_tool("export_artifact", json.dumps(args))
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return {"ok": False, "error": raw}
+    return data if isinstance(data, dict) else {"ok": False, "error": raw}
+
+
+def _append_export_note(step_output: str, export_result: dict | None, label: str) -> str:
+    if not export_result:
+        return step_output
+    if export_result.get("ok"):
+        note = (
+            f"\n\n---\n{label} Markdown export:\n"
+            f"- filename: {export_result.get('filename', '')}\n"
+            f"- path: {export_result.get('path', '')}\n"
+            f"- download_url: {export_result.get('download_url', '')}"
+        )
+    else:
+        note = f"\n\n---\n{label} Markdown export failed: {export_result.get('error', 'Unknown error')}"
+    return f"{step_output.rstrip()}{note}"
+
+
+async def _close_mcp_stack(stack: AsyncExitStack) -> None:
+    try:
+        await stack.aclose()
+    except BaseException as e:
+        logger.warning("MCP cleanup failed: %s", _brief_exception(e))
+
+
 async def _execute_mcp_or_native(tc_name, tc_arguments, mcp_connections, db):
+    if is_builtin_tool(tc_name):
+        return await execute_builtin_tool(tc_name, tc_arguments)
     parsed = parse_mcp_tool_name(tc_name)
     if parsed:
         server_name, original_tool_name = parsed
@@ -286,6 +398,8 @@ async def _execute_mcp_or_native(tc_name, tc_arguments, mcp_connections, db):
 
 
 async def _execute_mcp_or_native_mongo(tc_name, tc_arguments, mcp_connections, mongo_db):
+    if is_builtin_tool(tc_name):
+        return await execute_builtin_tool(tc_name, tc_arguments)
     parsed = parse_mcp_tool_name(tc_name)
     if parsed:
         server_name, original_tool_name = parsed
@@ -309,7 +423,10 @@ async def _chat_with_tools(llm, messages, system_prompt, tools, db):
             return response.content or ""
         chat_messages.append(LLMMessage(role="assistant", content=response.content or ""))
         for tc in response.tool_calls:
-            result = _execute_tool(tc.name, tc.arguments, db)
+            if is_builtin_tool(tc.name):
+                result = await execute_builtin_tool(tc.name, tc.arguments)
+            else:
+                result = _execute_tool(tc.name, tc.arguments, db)
             chat_messages.append(LLMMessage(role="user", content=f"[Tool '{tc.name}' returned: {result}]\n\n{TOOL_RESULT_PROMPT}"))
     final = await llm.chat(chat_messages, system_prompt=system_prompt)
     return final.content or ""
@@ -323,14 +440,19 @@ async def _chat_with_tools_mongo(llm, messages, system_prompt, tools, mongo_db):
             return response.content or ""
         chat_messages.append(LLMMessage(role="assistant", content=response.content or ""))
         for tc in response.tool_calls:
-            result = await _execute_tool_mongo(tc.name, tc.arguments, mongo_db)
+            if is_builtin_tool(tc.name):
+                result = await execute_builtin_tool(tc.name, tc.arguments)
+            else:
+                result = await _execute_tool_mongo(tc.name, tc.arguments, mongo_db)
             chat_messages.append(LLMMessage(role="user", content=f"[Tool '{tc.name}' returned: {result}]\n\n{TOOL_RESULT_PROMPT}"))
     final = await llm.chat(chat_messages, system_prompt=system_prompt)
     return final.content or ""
 
 
 async def _chat_with_tools_and_mcp(llm, messages, system_prompt, tools, db, mcp_configs):
-    async with AsyncExitStack() as stack:
+    stack = AsyncExitStack()
+    await stack.__aenter__()
+    try:
         mcp_connections, all_mcp_tools = await _connect_mcp_servers(stack, mcp_configs)
         merged = _merge_tools(tools, all_mcp_tools)
         chat_messages = list(messages)
@@ -344,10 +466,14 @@ async def _chat_with_tools_and_mcp(llm, messages, system_prompt, tools, db, mcp_
                 chat_messages.append(LLMMessage(role="user", content=f"[Tool '{tc.name}' returned: {result}]\n\n{TOOL_RESULT_PROMPT}"))
         final = await llm.chat(chat_messages, system_prompt=system_prompt)
         return final.content or ""
+    finally:
+        await _close_mcp_stack(stack)
 
 
 async def _chat_with_tools_and_mcp_mongo(llm, messages, system_prompt, tools, mongo_db, mcp_configs):
-    async with AsyncExitStack() as stack:
+    stack = AsyncExitStack()
+    await stack.__aenter__()
+    try:
         mcp_connections, all_mcp_tools = await _connect_mcp_servers(stack, mcp_configs)
         merged = _merge_tools(tools, all_mcp_tools)
         chat_messages = list(messages)
@@ -361,6 +487,8 @@ async def _chat_with_tools_and_mcp_mongo(llm, messages, system_prompt, tools, mo
                 chat_messages.append(LLMMessage(role="user", content=f"[Tool '{tc.name}' returned: {result}]\n\n{TOOL_RESULT_PROMPT}"))
         final = await llm.chat(chat_messages, system_prompt=system_prompt)
         return final.content or ""
+    finally:
+        await _close_mcp_stack(stack)
 
 
 # ---------------------------------------------------------------------------
@@ -658,15 +786,19 @@ async def _execute_workflow_sqlite(run, workflow, sorted_steps, step_results, us
                 if is_last:
                     # Stream the final step
                     full_content = ""
+                    tool_results: list[tuple[str, str]] = []
                     if mcp_configs:
-                        async with AsyncExitStack() as stack:
+                        stack = AsyncExitStack()
+                        await stack.__aenter__()
+                        try:
                             mcp_connections, all_mcp_tools = await _connect_mcp_servers(stack, mcp_configs)
                             merged = _merge_tools(tools, all_mcp_tools)
                             for _round in range(MAX_TOOL_ROUNDS + 1):
+                                round_content = ""
                                 tool_calls_collected = []
                                 async for chunk in llm.chat_stream(messages, system_prompt=agent.system_prompt, tools=merged):
                                     if chunk.type == "content":
-                                        full_content += chunk.content
+                                        round_content += chunk.content
                                         yield {"event": "step_content_delta", "data": json.dumps({"step_order": step_order, "content": chunk.content})}
                                     elif chunk.type == "tool_call" and chunk.tool_call:
                                         tool_calls_collected.append(chunk.tool_call)
@@ -674,19 +806,23 @@ async def _execute_workflow_sqlite(run, workflow, sorted_steps, step_results, us
                                         break
                                     elif chunk.type == "error":
                                         raise Exception(chunk.error)
+                                full_content = round_content
                                 if not tool_calls_collected:
                                     break
-                                messages.append(LLMMessage(role="assistant", content=""))
+                                messages.append(LLMMessage(role="assistant", content=round_content))
                                 for tc in tool_calls_collected:
                                     result = await _execute_mcp_or_native(tc.name, tc.arguments, mcp_connections, db)
+                                    tool_results.append((tc.name, result))
                                     messages.append(LLMMessage(role="user", content=f"[Tool '{tc.name}' returned: {result}]\n\n{TOOL_RESULT_PROMPT}"))
-                                full_content = ""
+                        finally:
+                            await _close_mcp_stack(stack)
                     else:
                         for _round in range(MAX_TOOL_ROUNDS + 1):
+                            round_content = ""
                             tool_calls_collected = []
                             async for chunk in llm.chat_stream(messages, system_prompt=agent.system_prompt, tools=tools):
                                 if chunk.type == "content":
-                                    full_content += chunk.content
+                                    round_content += chunk.content
                                     yield {"event": "step_content_delta", "data": json.dumps({"step_order": step_order, "content": chunk.content})}
                                 elif chunk.type == "tool_call" and chunk.tool_call:
                                     tool_calls_collected.append(chunk.tool_call)
@@ -694,20 +830,31 @@ async def _execute_workflow_sqlite(run, workflow, sorted_steps, step_results, us
                                     break
                                 elif chunk.type == "error":
                                     raise Exception(chunk.error)
+                            full_content = round_content
                             if not tool_calls_collected:
                                 break
-                            messages.append(LLMMessage(role="assistant", content=""))
+                            messages.append(LLMMessage(role="assistant", content=round_content))
                             for tc in tool_calls_collected:
-                                result = _execute_tool(tc.name, tc.arguments, db)
+                                if is_builtin_tool(tc.name):
+                                    result = await execute_builtin_tool(tc.name, tc.arguments)
+                                else:
+                                    result = _execute_tool(tc.name, tc.arguments, db)
+                                tool_results.append((tc.name, result))
                                 messages.append(LLMMessage(role="user", content=f"[Tool '{tc.name}' returned: {result}]\n\n{TOOL_RESULT_PROMPT}"))
-                            full_content = ""
-                    step_output = full_content
+                    step_output = full_content.strip() or _fallback_output_from_tool_results(tool_results)
                 else:
                     # Non-final steps: non-streaming with tool support
                     if mcp_configs:
                         step_output = await _chat_with_tools_and_mcp(llm, messages, agent.system_prompt, tools, db, mcp_configs)
                     else:
                         step_output = await _chat_with_tools(llm, messages, agent.system_prompt, tools, db)
+
+                markdown_export = await _maybe_export_step_markdown(
+                    step_def,
+                    step_output,
+                    f"{workflow.name} - {agent.name} - run {run_id}",
+                )
+                step_output = _append_export_note(step_output, markdown_export, agent.name)
 
                 # Mark step complete
                 step_results[i]["status"] = "completed"
@@ -1029,15 +1176,19 @@ async def _execute_dag_sqlite(run, workflow, steps, user_input, db):
 
         try:
             full_content = ""
+            tool_results: list[tuple[str, str]] = []
             if mcp_configs:
-                async with AsyncExitStack() as stack:
+                stack = AsyncExitStack()
+                await stack.__aenter__()
+                try:
                     mcp_connections, all_mcp_tools = await _connect_mcp_servers(stack, mcp_configs)
                     merged = _merge_tools(tools, all_mcp_tools)
                     for _round in range(MAX_TOOL_ROUNDS + 1):
+                        round_content = ""
                         tool_calls_collected = []
                         async for chunk in llm.chat_stream(messages, system_prompt=agent.system_prompt, tools=merged):
                             if chunk.type == "content":
-                                full_content += chunk.content
+                                round_content += chunk.content
                                 await sse_queue.put({"event": "node_content_delta", "node_id": node_id, "content": chunk.content})
                             elif chunk.type == "tool_call" and chunk.tool_call:
                                 tool_calls_collected.append(chunk.tool_call)
@@ -1045,19 +1196,23 @@ async def _execute_dag_sqlite(run, workflow, steps, user_input, db):
                                 break
                             elif chunk.type == "error":
                                 raise Exception(chunk.error)
+                        full_content = round_content
                         if not tool_calls_collected:
                             break
-                        messages.append(LLMMessage(role="assistant", content=""))
+                        messages.append(LLMMessage(role="assistant", content=round_content))
                         for tc in tool_calls_collected:
                             result = await _execute_mcp_or_native(tc.name, tc.arguments, mcp_connections, db)
+                            tool_results.append((tc.name, result))
                             messages.append(LLMMessage(role="user", content=f"[Tool '{tc.name}' returned: {result}]\n\n{TOOL_RESULT_PROMPT}"))
-                        full_content = ""
+                finally:
+                    await _close_mcp_stack(stack)
             else:
                 for _round in range(MAX_TOOL_ROUNDS + 1):
+                    round_content = ""
                     tool_calls_collected = []
                     async for chunk in llm.chat_stream(messages, system_prompt=agent.system_prompt, tools=tools):
                         if chunk.type == "content":
-                            full_content += chunk.content
+                            round_content += chunk.content
                             await sse_queue.put({"event": "node_content_delta", "node_id": node_id, "content": chunk.content})
                         elif chunk.type == "tool_call" and chunk.tool_call:
                             tool_calls_collected.append(chunk.tool_call)
@@ -1065,14 +1220,19 @@ async def _execute_dag_sqlite(run, workflow, steps, user_input, db):
                             break
                         elif chunk.type == "error":
                             raise Exception(chunk.error)
+                    full_content = round_content
                     if not tool_calls_collected:
                         break
-                    messages.append(LLMMessage(role="assistant", content=""))
+                    messages.append(LLMMessage(role="assistant", content=round_content))
                     for tc in tool_calls_collected:
-                        result = _execute_tool(tc.name, tc.arguments, db)
+                        if is_builtin_tool(tc.name):
+                            result = await execute_builtin_tool(tc.name, tc.arguments)
+                        else:
+                            result = _execute_tool(tc.name, tc.arguments, db)
+                        tool_results.append((tc.name, result))
                         messages.append(LLMMessage(role="user", content=f"[Tool '{tc.name}' returned: {result}]\n\n{TOOL_RESULT_PROMPT}"))
-                    full_content = ""
 
+            full_content = full_content.strip() or _fallback_output_from_tool_results(tool_results)
             outputs[node_id] = full_content
             step_results_by_id[node_id]["status"] = "completed"
             step_results_by_id[node_id]["output"] = full_content
@@ -1455,15 +1615,17 @@ async def _execute_workflow_mongo(run, workflow, sorted_steps, step_results, use
             try:
                 if is_last:
                     full_content = ""
+                    tool_results: list[tuple[str, str]] = []
                     if mcp_configs:
                         async with AsyncExitStack() as stack:
                             mcp_connections, all_mcp_tools = await _connect_mcp_servers(stack, mcp_configs)
                             merged = _merge_tools(tools, all_mcp_tools)
                             for _round in range(MAX_TOOL_ROUNDS + 1):
+                                round_content = ""
                                 tool_calls_collected = []
                                 async for chunk in llm.chat_stream(messages, system_prompt=agent.get("system_prompt"), tools=merged):
                                     if chunk.type == "content":
-                                        full_content += chunk.content
+                                        round_content += chunk.content
                                         yield {"event": "step_content_delta", "data": json.dumps({"step_order": step_order, "content": chunk.content})}
                                     elif chunk.type == "tool_call" and chunk.tool_call:
                                         tool_calls_collected.append(chunk.tool_call)
@@ -1471,19 +1633,21 @@ async def _execute_workflow_mongo(run, workflow, sorted_steps, step_results, use
                                         break
                                     elif chunk.type == "error":
                                         raise Exception(chunk.error)
+                                full_content = round_content
                                 if not tool_calls_collected:
                                     break
-                                messages.append(LLMMessage(role="assistant", content=""))
+                                messages.append(LLMMessage(role="assistant", content=round_content))
                                 for tc in tool_calls_collected:
                                     result = await _execute_mcp_or_native_mongo(tc.name, tc.arguments, mcp_connections, mongo_db)
+                                    tool_results.append((tc.name, result))
                                     messages.append(LLMMessage(role="user", content=f"[Tool '{tc.name}' returned: {result}]\n\n{TOOL_RESULT_PROMPT}"))
-                                full_content = ""
                     else:
                         for _round in range(MAX_TOOL_ROUNDS + 1):
+                            round_content = ""
                             tool_calls_collected = []
                             async for chunk in llm.chat_stream(messages, system_prompt=agent.get("system_prompt"), tools=tools):
                                 if chunk.type == "content":
-                                    full_content += chunk.content
+                                    round_content += chunk.content
                                     yield {"event": "step_content_delta", "data": json.dumps({"step_order": step_order, "content": chunk.content})}
                                 elif chunk.type == "tool_call" and chunk.tool_call:
                                     tool_calls_collected.append(chunk.tool_call)
@@ -1491,19 +1655,30 @@ async def _execute_workflow_mongo(run, workflow, sorted_steps, step_results, use
                                     break
                                 elif chunk.type == "error":
                                     raise Exception(chunk.error)
+                            full_content = round_content
                             if not tool_calls_collected:
                                 break
-                            messages.append(LLMMessage(role="assistant", content=""))
+                            messages.append(LLMMessage(role="assistant", content=round_content))
                             for tc in tool_calls_collected:
-                                result = await _execute_tool_mongo(tc.name, tc.arguments, mongo_db)
+                                if is_builtin_tool(tc.name):
+                                    result = await execute_builtin_tool(tc.name, tc.arguments)
+                                else:
+                                    result = await _execute_tool_mongo(tc.name, tc.arguments, mongo_db)
+                                tool_results.append((tc.name, result))
                                 messages.append(LLMMessage(role="user", content=f"[Tool '{tc.name}' returned: {result}]\n\n{TOOL_RESULT_PROMPT}"))
-                            full_content = ""
-                    step_output = full_content
+                    step_output = full_content.strip() or _fallback_output_from_tool_results(tool_results)
                 else:
                     if mcp_configs:
                         step_output = await _chat_with_tools_and_mcp_mongo(llm, messages, agent.get("system_prompt"), tools, mongo_db, mcp_configs)
                     else:
                         step_output = await _chat_with_tools_mongo(llm, messages, agent.get("system_prompt"), tools, mongo_db)
+
+                markdown_export = await _maybe_export_step_markdown(
+                    step_def,
+                    step_output,
+                    f"{workflow.get('name', 'Workflow')} - {agent.get('name', 'Agent')} - run {run_id}",
+                )
+                step_output = _append_export_note(step_output, markdown_export, agent.get("name", "Agent"))
 
                 step_results[i]["status"] = "completed"
                 step_results[i]["output"] = step_output
