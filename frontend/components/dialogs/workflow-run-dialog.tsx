@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useRef, useEffect } from "react"
+import { useState, useRef, useEffect, useMemo } from "react"
 import {
   Dialog,
   DialogContent,
@@ -44,6 +44,23 @@ interface WorkflowRunDialogProps {
   workflow: Workflow | null
   agents: Agent[]
 }
+
+interface WorkflowRunDraft {
+  input?: string
+  links?: string[]
+}
+
+interface WorkflowScopedInput {
+  workflowId: string
+  input: string
+}
+
+interface WorkflowScopedLinks {
+  workflowId: string
+  links: string[]
+}
+
+const WORKFLOW_DRAFT_STORAGE_PREFIX = "obsidian-ai:workflow-run-draft:"
 
 function generateRunId(): string {
   const words = ["alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel", "india", "juliet", "kilo", "lima", "mike", "nova", "oscar", "papa", "romeo", "sierra", "tango", "uniform", "victor", "whiskey", "xray", "yankee", "zulu"]
@@ -97,6 +114,32 @@ function mediaTypeForFile(file: File): string {
   return "application/octet-stream"
 }
 
+function workflowDraftKey(workflowId: string): string {
+  return `${WORKFLOW_DRAFT_STORAGE_PREFIX}${workflowId}`
+}
+
+function loadWorkflowDraft(workflowId: string): WorkflowRunDraft | null {
+  try {
+    const raw = window.localStorage.getItem(workflowDraftKey(workflowId))
+    if (!raw) return null
+    const parsed = JSON.parse(raw) as WorkflowRunDraft
+    return {
+      input: typeof parsed.input === "string" ? parsed.input : undefined,
+      links: Array.isArray(parsed.links) ? parsed.links.filter((link) => typeof link === "string") : [],
+    }
+  } catch {
+    return null
+  }
+}
+
+function saveWorkflowDraft(workflowId: string, draft: WorkflowRunDraft): void {
+  try {
+    window.localStorage.setItem(workflowDraftKey(workflowId), JSON.stringify(draft))
+  } catch {
+    // Draft persistence is best-effort only.
+  }
+}
+
 export function WorkflowRunDialog({
   open,
   onOpenChange,
@@ -119,17 +162,36 @@ export function WorkflowRunDialog({
   const outputRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [currentRunLabel] = useState(generateRunId)
-  const [runInput, setRunInput] = useState<string | null>(null)
+  const [runInput, setRunInput] = useState<WorkflowScopedInput | null>(null)
   const [attachments, setAttachments] = useState<FileAttachment[]>([])
   const [linkInput, setLinkInput] = useState("")
-  const [attachedLinks, setAttachedLinks] = useState<string[]>([])
+  const [attachedLinks, setAttachedLinks] = useState<WorkflowScopedLinks | null>(null)
   const [attachmentError, setAttachmentError] = useState<string | null>(null)
+  const workflowId = workflow?.id ?? ""
+  const savedDraft = useMemo(() => {
+    if (!open || !workflowId || typeof window === "undefined") return null
+    return loadWorkflowDraft(workflowId)
+  }, [open, workflowId])
+  const currentRunInput = runInput?.workflowId === workflowId ? runInput.input : savedDraft?.input ?? null
+  const currentLinks = useMemo(
+    () => attachedLinks?.workflowId === workflowId ? attachedLinks.links : savedDraft?.links ?? [],
+    [attachedLinks, savedDraft, workflowId],
+  )
 
   useEffect(() => {
     if (outputRef.current) {
       outputRef.current.scrollTop = outputRef.current.scrollHeight
     }
   }, [finalOutput, stepOutputs, streamingStepOrder])
+
+  useEffect(() => {
+    if (!open || !workflowId) return
+    if (currentRunInput === null && currentLinks.length === 0) return
+    saveWorkflowDraft(workflowId, {
+      input: currentRunInput ?? undefined,
+      links: currentLinks,
+    })
+  }, [open, workflowId, currentRunInput, currentLinks])
 
   const toggleOutput = (key: number | "final") => {
     setExpandedOutputs((prev) => {
@@ -156,7 +218,7 @@ export function WorkflowRunDialog({
     setExpandedOutputs(new Set())
     setRunInput(null)
     setAttachments([])
-    setAttachedLinks([])
+    setAttachedLinks(null)
     setLinkInput("")
     setAttachmentError(null)
     if (fileInputRef.current) fileInputRef.current.value = ""
@@ -184,15 +246,18 @@ export function WorkflowRunDialog({
 
   const handleAddLink = () => {
     const value = linkInput.trim()
-    if (!value) return
-    setAttachedLinks((prev) => [...prev, value])
+    if (!value || !workflowId) return
+    setAttachedLinks((prev) => ({
+      workflowId,
+      links: [...(prev?.workflowId === workflowId ? prev.links : currentLinks), value],
+    }))
     setLinkInput("")
     setAttachmentError(null)
   }
 
   const workflowInputWithLinks = (input: string) => {
-    if (attachedLinks.length === 0) return input
-    return `${input.trim()}\n\nBackground file links:\n${attachedLinks.map((link) => `- ${link}`).join("\n")}`
+    if (currentLinks.length === 0) return input
+    return `${input.trim()}\n\nBackground file links:\n${currentLinks.map((link) => `- ${link}`).join("\n")}`
   }
 
   const stepIndexByNodeId = (nodeId: string) => {
@@ -208,7 +273,7 @@ export function WorkflowRunDialog({
   const handleRun = async () => {
     if (!session?.accessToken || !workflow || isRunning) return
 
-    const workflowInput = workflowInputWithLinks(runInput ?? getDefaultRunInput(workflow)).trim()
+    const workflowInput = workflowInputWithLinks(currentRunInput ?? getDefaultRunInput(workflow)).trim()
     if (!workflowInput && attachments.length === 0) {
       setError("Enter workflow input before running.")
       return
@@ -337,8 +402,8 @@ export function WorkflowRunDialog({
   if (!workflow) return null
 
   const sortedSteps = [...workflow.steps].sort((a, b) => a.order - b.order)
-  const effectiveRunInput = runInput ?? getDefaultRunInput(workflow)
-  const canRun = effectiveRunInput.trim().length > 0 || attachments.length > 0 || attachedLinks.length > 0
+  const effectiveRunInput = currentRunInput ?? getDefaultRunInput(workflow)
+  const canRun = effectiveRunInput.trim().length > 0 || attachments.length > 0 || currentLinks.length > 0
 
   const getStepName = (step: typeof sortedSteps[0]) => {
     if (step.node_type && step.node_type !== "agent") {
@@ -486,7 +551,7 @@ export function WorkflowRunDialog({
                   <Textarea
                     value={effectiveRunInput}
                     onChange={(event) => {
-                      setRunInput(event.target.value)
+                      setRunInput({ workflowId, input: event.target.value })
                       if (error) setError(null)
                     }}
                     placeholder="Ultrasound volume imaging analysis..."
@@ -533,7 +598,7 @@ export function WorkflowRunDialog({
                         </Button>
                       </div>
                     </div>
-                    {(attachments.length > 0 || attachedLinks.length > 0) && (
+                    {(attachments.length > 0 || currentLinks.length > 0) && (
                       <div className="max-h-24 overflow-y-auto rounded-md border border-border/60 bg-muted/10 p-2">
                         <div className="flex flex-wrap gap-2">
                           {attachments.map((file, index) => (
@@ -550,13 +615,16 @@ export function WorkflowRunDialog({
                               </button>
                             </Badge>
                           ))}
-                          {attachedLinks.map((link, index) => (
+                          {currentLinks.map((link, index) => (
                             <Badge key={`${link}-${index}`} variant="outline" className="gap-1.5 px-2 py-1 text-[11px]">
                               <Link2 className="h-3 w-3" />
                               <span className="max-w-72 truncate">{link}</span>
                               <button
                                 type="button"
-                                onClick={() => setAttachedLinks((prev) => prev.filter((_, i) => i !== index))}
+                                onClick={() => setAttachedLinks({
+                                  workflowId,
+                                  links: currentLinks.filter((_, i) => i !== index),
+                                })}
                                 className="rounded-sm text-muted-foreground hover:text-foreground"
                                 aria-label={`Remove ${link}`}
                               >

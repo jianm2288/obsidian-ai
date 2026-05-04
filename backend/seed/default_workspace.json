@@ -610,6 +610,89 @@
       "config": {
         "temperature": 0.2
       }
+    },
+    {
+      "name": "Dev Planner",
+      "description": "Creates project development plans with tasks, schedules, milestones, resources, budget assumptions, deliverables, risks, and decision gates.",
+      "system_prompt": "You are Dev Planner, a practical project planning agent.\n\n<role>\nYou turn a user project description, optional background materials, and optional links into an actionable development plan. You may use web_search and fetch_url for missing current facts, vendor information, standards, public documentation, or cost assumptions, but you must identify what was assumed versus verified.\n</role>\n\n<instructions>\n1. Identify the project goal, scope, stakeholders, constraints, desired deliverables, and unknowns.\n2. Treat uploaded files, pasted context, and links as project background, not automatically as complete or correct.\n3. Produce a concrete work breakdown structure with phases, tasks, owners/roles, dependencies, milestones, schedule, resources, cost categories, deliverables, risks, and acceptance criteria.\n4. Use ranges for uncertain schedules or costs and state the assumptions behind them.\n5. Include a minimum viable plan and optional stretch scope when useful.\n6. Flag missing information that materially affects feasibility, budget, or timeline.\n7. Do not invent vendor pricing, regulations, external constraints, or file contents; use tools or label estimates as assumptions.\n8. When revising, explicitly respond to Engineer Reviewer, Accountant Reviewer, and Project Manager Reviewer feedback.\n</instructions>\n\n<output_description>\nUse headings: Project Understanding, Assumptions and Unknowns, Scope, Work Breakdown, Schedule and Milestones, Resources, Budget Estimate, Deliverables, Risks and Mitigations, Acceptance Criteria, Decision Points, Open Questions.\n</output_description>\n",
+      "provider_name": "deepseek v4",
+      "model_id": "deepseek-chat",
+      "tools": [
+        "calculator",
+        "get_datetime"
+      ],
+      "knowledge_bases": [],
+      "hitl_confirmation_tools": [],
+      "allow_tool_creation": false,
+      "memory_enabled": true,
+      "sandbox_enabled": false,
+      "is_active": true,
+      "mcp_servers": [],
+      "config": {
+        "temperature": 0.25
+      }
+    },
+    {
+      "name": "Engineer Reviewer",
+      "description": "Reviews project plans for technical feasibility, architecture, dependencies, implementation risk, testing, and delivery realism.",
+      "system_prompt": "You are Engineer Reviewer, a technical feasibility review agent.\n\n<role>\nYou review the Dev Planner output and project background for engineering realism. You do not rewrite the whole project plan; you identify technical blockers, risky assumptions, missing tasks, sequencing issues, integration risks, security/privacy concerns, test needs, and implementation tradeoffs.\n</role>\n\n<instructions>\n1. Evaluate whether the proposed scope, schedule, milestones, and deliverables are technically feasible.\n2. Check architecture, dependencies, data flows, integrations, deployment, operations, security, privacy, and testing assumptions when relevant.\n3. Identify missing engineering tasks, hidden complexity, and risks that could change schedule or cost.\n4. Provide concrete recommendations and plan edits, not vague concerns.\n5. Use web_search or fetch_url only when current technical facts, vendor docs, or platform constraints are needed.\n6. Distinguish blockers, major risks, minor risks, and nice-to-have improvements.\n7. Do not fabricate implementation facts, vendor capabilities, or benchmark numbers.\n</instructions>\n\n<output_description>\nUse headings: Feasibility Summary, Blockers, Major Technical Risks, Missing Engineering Work, Schedule/Dependency Concerns, Testing and Acceptance, Recommended Plan Changes, Engineering Verdict.\n</output_description>\n",
+      "provider_name": "deepseek v4",
+      "model_id": "deepseek-chat",
+      "tools": [
+        "calculator"
+      ],
+      "knowledge_bases": [],
+      "hitl_confirmation_tools": [],
+      "allow_tool_creation": false,
+      "memory_enabled": true,
+      "sandbox_enabled": false,
+      "is_active": true,
+      "mcp_servers": [],
+      "config": {
+        "temperature": 0.2
+      }
+    },
+    {
+      "name": "Accountant Reviewer",
+      "description": "Reviews project plans for budget realism, cost categories, assumptions, cash timing, contingency, and financial risk.",
+      "system_prompt": "You are Accountant Reviewer, a budget and financial planning review agent.\n\n<role>\nYou review the Dev Planner output and project background for budget completeness and financial realism. You do not rewrite the whole project plan; you audit cost assumptions, missing budget lines, timing, contingency, resource rates, and financial risks.\n</role>\n\n<instructions>\n1. Review labor, vendor, tooling, infrastructure, data, compliance, travel, support, maintenance, and contingency costs when relevant.\n2. Check whether cost assumptions are explicit, traceable, and reasonable for the project scope.\n3. Identify missing costs, underestimated categories, timing/cash-flow issues, and approval thresholds.\n4. Use web_search or fetch_url only when current public pricing or vendor cost context is needed.\n5. Present budget feedback as ranges when uncertainty is high.\n6. Do not fabricate quotes, invoices, vendor prices, tax advice, or legal/accounting conclusions.\n7. Provide concrete corrections the Dev Planner can incorporate.\n</instructions>\n\n<output_description>\nUse headings: Budget Review Summary, Missing Cost Categories, Questionable Assumptions, Suggested Budget Ranges, Contingency and Cash Timing, Financial Risks, Recommended Plan Changes, Budget Verdict.\n</output_description>\n",
+      "provider_name": "deepseek v4",
+      "model_id": "deepseek-chat",
+      "tools": [
+        "calculator",
+        "get_datetime"
+      ],
+      "knowledge_bases": [],
+      "hitl_confirmation_tools": [],
+      "allow_tool_creation": false,
+      "memory_enabled": true,
+      "sandbox_enabled": false,
+      "is_active": true,
+      "mcp_servers": [],
+      "config": {
+        "temperature": 0.2
+      }
+    },
+    {
+      "name": "Project Manager Reviewer",
+      "description": "Synthesizes technical and budget reviews, decides whether a project plan is approvable, and writes revision feedback or final approval.",
+      "system_prompt": "You are Project Manager Reviewer, a neutral project governance and delivery readiness agent.\n\n<role>\nYou review the Dev Planner plan together with Engineer Reviewer and Accountant Reviewer feedback. Your job is to decide whether the plan is ready to approve or must be returned for revision. You do not perform independent technical or budget research unless a small clarification is needed; rely mainly on the plan and reviewer feedback.\n</role>\n\n<instructions>\n1. Compare the plan against engineering feasibility feedback and budget feedback.\n2. Decide whether the plan is ready for approval, conditionally approvable, or requires revision.\n3. If the plan is not ready, provide clear prioritized feedback for Dev Planner to revise.\n4. If reviewing a revised plan, judge whether the revision addressed prior feedback.\n5. Be explicit about decision status using one of these labels: APPROVED, CONDITIONALLY_APPROVED, or REVISE.\n6. Preserve unresolved risks and owner/action items instead of smoothing over disagreement.\n7. Do not invent new requirements, estimates, or facts not present in the project record.\n</instructions>\n\n<output_description>\nUse headings: Decision, Rationale, Required Revisions or Conditions, Reviewer Feedback Synthesis, Milestone/Resource/Budget Readiness, Key Risks, Final Recommendation.\n</output_description>\n",
+      "provider_name": "deepseek v4",
+      "model_id": "deepseek-chat",
+      "tools": [
+        "calculator",
+        "get_datetime"
+      ],
+      "knowledge_bases": [],
+      "hitl_confirmation_tools": [],
+      "allow_tool_creation": false,
+      "memory_enabled": true,
+      "sandbox_enabled": false,
+      "is_active": true,
+      "mcp_servers": [],
+      "config": {
+        "temperature": 0.2
+      }
     }
   ],
   "workflows": [
@@ -824,6 +907,202 @@
         "input_placeholder": "State the proposition to debate. Optionally paste or attach background material.",
         "default_run_input": "Statement to debate:\n[Replace this with the claim or position the agents should evaluate.]\n\nOptional background material:\n[Optional: paste a paper excerpt, abstract, notes, citation/link, or attach a PDF/DOCX/TXT/Markdown file. Leave blank if you want the advocate agents to research from the statement alone.]\n\nDecision context / audience:\n[Optional: who will use the verdict and what decision it informs.]\n\nSpecial instructions:\n- Proponent and opponent should verify key claims with targeted research.\n- If no background material is provided, proponent and opponent should form their arguments from statement-driven research.\n- Opening briefs should be followed by rebuttals.\n- Audience agents should evaluate only the debate briefs and rebuttals, not perform new research.\n- Verdict Writer should report majority and minority positions with caveats, without independent research.",
         "auto_export": false
+      },
+      "is_active": true
+    },
+    {
+      "name": "Development Planning Review",
+      "description": "Create a project development plan, review feasibility and budget, then route through project-management approval with up to two explicit revision rounds.",
+      "steps": [
+        {
+          "id": "initial_plan",
+          "node_type": "agent",
+          "task": "Read the project brief, optional background materials, and any pasted links. Use web_search or fetch_url only when needed to verify current public facts, platform constraints, vendor context, or cost assumptions. Produce a complete initial development project plan with broken-down tasks, schedule, milestones, resources, budget/cost assumptions, deliverables, risks, acceptance criteria, and open questions.",
+          "order": 1,
+          "depends_on": [],
+          "config": null,
+          "agent_name": "Dev Planner"
+        },
+        {
+          "id": "engineering_review_v1",
+          "node_type": "agent",
+          "task": "Review the initial project plan for technical feasibility. Focus on architecture, implementation complexity, dependencies, integrations, security/privacy, operations, testing, schedule realism, and hidden technical risks. Provide concrete plan edits and an engineering verdict.",
+          "order": 2,
+          "depends_on": [
+            "initial_plan"
+          ],
+          "config": null,
+          "agent_name": "Engineer Reviewer"
+        },
+        {
+          "id": "budget_review_v1",
+          "node_type": "agent",
+          "task": "Review the initial project plan for budget realism. Focus on labor, vendor/tooling, infrastructure, data, compliance, support, maintenance, contingency, cost timing, missing budget categories, and questionable assumptions. Provide concrete budget edits and a budget verdict.",
+          "order": 3,
+          "depends_on": [
+            "engineering_review_v1"
+          ],
+          "config": null,
+          "agent_name": "Accountant Reviewer"
+        },
+        {
+          "id": "pm_decision_v1",
+          "node_type": "agent",
+          "task": "Review the initial project plan together with the Engineering Reviewer and Accountant Reviewer outputs. Decide whether the plan is ready to approve or must be returned to Dev Planner. Start your response with exactly one machine-readable line: Decision: APPROVED, Decision: CONDITIONALLY_APPROVED, or Decision: REVISE. If approval is conditional, list the conditions. If revision is needed, provide prioritized feedback for the Dev Planner.",
+          "order": 4,
+          "depends_on": [
+            "initial_plan",
+            "engineering_review_v1",
+            "budget_review_v1"
+          ],
+          "config": null,
+          "agent_name": "Project Manager Reviewer"
+        },
+        {
+          "id": "approval_route_v1",
+          "node_type": "condition",
+          "task": "Route the Project Manager Reviewer round 1 decision using its first Decision line.",
+          "order": 5,
+          "depends_on": [
+            "pm_decision_v1"
+          ],
+          "config": {
+            "branches": [
+              "approved",
+              "revise"
+            ],
+            "decision_source": "pm_decision_line",
+            "condition_prompt": "Fallback only: read the PM decision and reply with approved for APPROVED/CONDITIONALLY_APPROVED or revise for REVISE."
+          }
+        },
+        {
+          "id": "approval_memo_v1",
+          "node_type": "agent",
+          "task": "Write the final approval memo from the approved or conditionally approved round 1 project plan. Include approved scope, schedule, milestones, resources, budget range, deliverables, approval conditions if any, key risks, and next actions. Do not invent new details beyond the upstream plan and reviews.",
+          "order": 6,
+          "depends_on": [
+            "approval_route_v1",
+            "pm_decision_v1"
+          ],
+          "input_branch": "approved",
+          "config": null,
+          "agent_name": "Project Manager Reviewer"
+        },
+        {
+          "id": "revised_plan_v2",
+          "node_type": "agent",
+          "task": "Revision round 1: revise the development project plan using PM round 1 feedback plus engineering and budget review comments. Produce Plan v2 with a change log showing how each major feedback item was addressed. Keep schedule, milestones, resources, costs, deliverables, risks, and acceptance criteria internally consistent.",
+          "order": 7,
+          "depends_on": [
+            "approval_route_v1",
+            "initial_plan",
+            "engineering_review_v1",
+            "budget_review_v1",
+            "pm_decision_v1"
+          ],
+          "input_branch": "revise",
+          "config": null,
+          "agent_name": "Dev Planner"
+        },
+        {
+          "id": "engineering_review_v2",
+          "node_type": "agent",
+          "task": "Review Plan v2 for technical feasibility. Focus on whether the revision addressed prior engineering concerns, whether any new technical risks were introduced, and what changes remain required before approval.",
+          "order": 8,
+          "depends_on": [
+            "revised_plan_v2"
+          ],
+          "config": null,
+          "agent_name": "Engineer Reviewer"
+        },
+        {
+          "id": "budget_review_v2",
+          "node_type": "agent",
+          "task": "Review Plan v2 for budget realism. Focus on whether the revision addressed prior budget concerns, whether cost ranges and contingencies are now adequate, and what budget changes remain required before approval.",
+          "order": 9,
+          "depends_on": [
+            "engineering_review_v2"
+          ],
+          "config": null,
+          "agent_name": "Accountant Reviewer"
+        },
+        {
+          "id": "pm_decision_v2",
+          "node_type": "agent",
+          "task": "Review Plan v2 together with the round 2 engineering and budget reviews. Start your response with exactly one machine-readable line: Decision: APPROVED, Decision: CONDITIONALLY_APPROVED, or Decision: REVISE. If still revising, provide prioritized final-round feedback for Dev Planner.",
+          "order": 10,
+          "depends_on": [
+            "revised_plan_v2",
+            "engineering_review_v2",
+            "budget_review_v2"
+          ],
+          "config": null,
+          "agent_name": "Project Manager Reviewer"
+        },
+        {
+          "id": "approval_route_v2",
+          "node_type": "condition",
+          "task": "Route the Project Manager Reviewer round 2 decision using its first Decision line.",
+          "order": 11,
+          "depends_on": [
+            "pm_decision_v2"
+          ],
+          "config": {
+            "branches": [
+              "approved",
+              "revise"
+            ],
+            "decision_source": "pm_decision_line",
+            "condition_prompt": "Fallback only: read the PM decision and reply with approved for APPROVED/CONDITIONALLY_APPROVED or revise for REVISE."
+          }
+        },
+        {
+          "id": "approval_memo_v2",
+          "node_type": "agent",
+          "task": "Write the final approval memo from the approved or conditionally approved Plan v2. Include approved scope, schedule, milestones, resources, budget range, deliverables, approval conditions if any, key risks, and next actions. Do not invent new details beyond upstream outputs.",
+          "order": 12,
+          "depends_on": [
+            "approval_route_v2",
+            "pm_decision_v2"
+          ],
+          "input_branch": "approved",
+          "config": null,
+          "agent_name": "Project Manager Reviewer"
+        },
+        {
+          "id": "revised_plan_v3",
+          "node_type": "agent",
+          "task": "Revision round 2: revise Plan v2 using PM round 2 feedback plus round 2 engineering and budget review comments. Produce Plan v3 with a concise change log. This is the final allowed revision round, so make the plan as approval-ready as possible while preserving unresolved risks.",
+          "order": 13,
+          "depends_on": [
+            "approval_route_v2",
+            "revised_plan_v2",
+            "engineering_review_v2",
+            "budget_review_v2",
+            "pm_decision_v2"
+          ],
+          "input_branch": "revise",
+          "config": null,
+          "agent_name": "Dev Planner"
+        },
+        {
+          "id": "final_pm_review",
+          "node_type": "agent",
+          "task": "Final review after two allowed revision rounds. Review Plan v3 against all prior PM, engineering, and budget feedback. Start with exactly one machine-readable line: Decision: APPROVED, Decision: CONDITIONALLY_APPROVED, or Decision: REVISE. Then write the final governance memo. If the decision is still REVISE, explain that the workflow has reached its revision limit and list unresolved blockers and recommended human next steps.",
+          "order": 14,
+          "depends_on": [
+            "revised_plan_v3"
+          ],
+          "config": null,
+          "agent_name": "Project Manager Reviewer"
+        }
+      ],
+      "config": {
+        "input_label": "Project brief and optional background",
+        "input_placeholder": "Describe the project. Optionally paste background text, links, or attach files.",
+        "default_run_input": "Project description:\n[Replace this with the project idea, product, system, research/development goal, or initiative.]\n\nProject context:\n[Replace with audience, organization/team, current state, constraints, deadline, target users/customers, and success criteria.]\n\nKnown requirements:\n- [Functional requirement]\n- [Technical/platform requirement]\n- [Compliance, quality, or documentation requirement]\n\nBudget / resource assumptions:\n[Optional: available budget, team size, roles, vendors, hardware/software, hourly rates, or cost constraints.]\n\nTimeline target:\n[Optional: desired start date, deadline, milestone dates, or urgency.]\n\nOptional background material:\n[Optional: paste excerpts, requirements, meeting notes, links, or attach PDF/DOCX/TXT/Markdown files.]\n\nPlanning instructions:\n- Dev Planner should propose a concrete project plan with tasks, schedule, milestones, resources, costs, deliverables, risks, and acceptance criteria.\n- Engineer Reviewer should review technical feasibility.\n- Accountant Reviewer should review budget realism.\n- Project Manager Reviewer should approve, conditionally approve, or return feedback for up to two revision rounds.",
+        "auto_export": false,
+        "max_parallel_nodes": 1
       },
       "is_active": true
     }

@@ -57,12 +57,6 @@ import type {
   HITLApprovalItem,
 } from "@/types/playground"
 
-interface ApiResponse<T> {
-  data?: T
-  error?: string
-  [key: string]: any
-}
-
 interface ListResponse<T> {
   [key: string]: T[]
 }
@@ -82,6 +76,18 @@ class ApiClient {
     url: string,
     options: RequestInit = {},
   ): Promise<T> {
+    const response = await this.requestResponse(url, options)
+
+    if (response.status === 204 || response.headers.get("content-length") === "0") {
+      return undefined as T
+    }
+    return response.json()
+  }
+
+  private async requestResponse(
+    url: string,
+    options: RequestInit = {},
+  ): Promise<Response> {
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
     }
@@ -104,14 +110,17 @@ class ApiClient {
         signOut({ callbackUrl: "/login" })
         throw new Error("Session expired. Redirecting to login...")
       }
-      const error = await response.json().catch(() => ({ detail: "Unknown error" }))
-      throw new Error(error.detail || `HTTP ${response.status}`)
+      const contentType = response.headers.get("content-type") || ""
+      if (contentType.includes("application/json")) {
+        const error = await response.json().catch(() => null)
+        throw new Error(error?.detail || error?.message || `HTTP ${response.status}`)
+      }
+      const text = await response.text().catch(() => "")
+      const detail = text.replace(/\s+/g, " ").trim()
+      throw new Error(detail ? `HTTP ${response.status}: ${detail.slice(0, 300)}` : `HTTP ${response.status}`)
     }
 
-    if (response.status === 204 || response.headers.get("content-length") === "0") {
-      return undefined as T
-    }
-    return response.json()
+    return response
   }
 
   // ============= Providers =============
@@ -426,6 +435,20 @@ class ApiClient {
     return this.request<WorkflowRun>(AppRoutes.GetWorkflowRun(runId))
   }
 
+  async getWorkflowRunTranscript(runId: string): Promise<string> {
+    const response = await this.requestResponse(
+      AppRoutes.ExportWorkflowRunTranscript(runId, "markdown"),
+    )
+    return response.text()
+  }
+
+  async getWorkflowRunTranscriptPdf(runId: string): Promise<Blob> {
+    const response = await this.requestResponse(
+      AppRoutes.ExportWorkflowRunTranscript(runId, "pdf"),
+    )
+    return response.blob()
+  }
+
   async deleteWorkflowRun(runId: string): Promise<void> {
     await this.request<void>(AppRoutes.DeleteWorkflowRun(runId), { method: "DELETE" })
   }
@@ -490,8 +513,8 @@ class ApiClient {
     })
   }
 
-  async testMCPServer(id: string): Promise<{ success: boolean; tools: any[]; tools_count: number; error?: string }> {
-    return this.request<{ success: boolean; tools: any[]; tools_count: number; error?: string }>(
+  async testMCPServer(id: string): Promise<{ success: boolean; tools: unknown[]; tools_count: number; error?: string }> {
+    return this.request<{ success: boolean; tools: unknown[]; tools_count: number; error?: string }>(
       AppRoutes.TestMCPServer(id),
       { method: "POST" },
     )
@@ -505,8 +528,8 @@ class ApiClient {
     env?: Record<string, string>
     url?: string
     headers?: Record<string, string>
-  }): Promise<{ success: boolean; tools: any[]; tools_count: number; error?: string }> {
-    return this.request<{ success: boolean; tools: any[]; tools_count: number; error?: string }>(
+  }): Promise<{ success: boolean; tools: unknown[]; tools_count: number; error?: string }> {
+    return this.request<{ success: boolean; tools: unknown[]; tools_count: number; error?: string }>(
       AppRoutes.TestMCPConfig(),
       { method: "POST", body: JSON.stringify(config) },
     )

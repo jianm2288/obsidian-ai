@@ -8,8 +8,10 @@ These tools intentionally wrap external renderers instead of replacing them:
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
+from importlib import resources
 from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin, urlparse
@@ -25,6 +27,17 @@ OBSIDIAN_EXPORT_SETUP = (
     "pandoc >= 3.5 and tectonic >= 0.15 are available. Run `uv run obsidian-export doctor` "
     "from the backend folder to verify the renderer."
 )
+
+_CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]")
+_CJK_FONT_CANDIDATES = (
+    "DengXian",
+    "SimHei",
+    "SimSun",
+    "Microsoft YaHei",
+    "Microsoft YaHei UI",
+    "Noto Sans SC",
+)
+_MONO_FONT_CANDIDATES = ("Consolas", "Cascadia Mono", "Courier New")
 
 
 def obsidian_export_pdf(params: dict[str, Any]) -> dict[str, Any]:
@@ -56,6 +69,9 @@ def obsidian_export_pdf(params: dict[str, Any]) -> dict[str, Any]:
         input_path.write_text(_flowing_pdf_markdown(markdown, title), encoding="utf-8")
 
     output_path = _unique_export_path(params.get("filename"), title, "pdf")
+    profile_path = profile
+    if not profile_path and _contains_cjk(markdown):
+        profile_path = str(_cjk_pdf_profile_path(work_dir))
     cmd = [
         exe,
         "convert",
@@ -66,15 +82,15 @@ def obsidian_export_pdf(params: dict[str, Any]) -> dict[str, Any]:
         "--output",
         str(output_path),
     ]
-    if profile:
-        cmd.extend(["--profile", profile])
+    if profile_path:
+        cmd.extend(["--profile", profile_path])
 
     try:
         env = _export_process_env()
         timeout = int(params.get("timeout_seconds") or 180)
         completed = _run_obsidian_export(cmd, timeout, env)
-        if completed.returncode != 0 and profile and _looks_like_missing_profile(completed):
-            retry_cmd = [part for part in cmd if part not in {"--profile", profile}]
+        if completed.returncode != 0 and profile_path and _looks_like_missing_profile(completed):
+            retry_cmd = [part for part in cmd if part not in {"--profile", profile_path}]
             completed = _run_obsidian_export(retry_cmd, timeout, env)
     except subprocess.TimeoutExpired:
         return {"ok": False, "error": "obsidian-export timed out while rendering PDF"}
@@ -182,6 +198,83 @@ def _frontmatter_block(metadata: dict[str, Any]) -> str:
     if not metadata:
         return ""
     return "---\n" + yaml.safe_dump(metadata, allow_unicode=True, sort_keys=False) + "---\n\n"
+
+
+def _contains_cjk(text: str) -> bool:
+    return bool(_CJK_RE.search(text or ""))
+
+
+def _cjk_pdf_profile_path(work_dir: Path) -> Path:
+    mainfont = _available_font_name(_CJK_FONT_CANDIDATES)
+    monofont = _available_font_name(_MONO_FONT_CANDIDATES)
+    style_dir = _cjk_style_dir(work_dir, mainfont)
+    profile_path = work_dir / "obsidian-export-cjk-profile.yaml"
+    profile = {
+        "style": {
+            "name": "default",
+            "style_dir": str(style_dir),
+            "mainfont": mainfont,
+            "sansfont": mainfont,
+            "monofont": monofont,
+        }
+    }
+    profile_path.write_text(yaml.safe_dump(profile, allow_unicode=True, sort_keys=False), encoding="utf-8")
+    return profile_path
+
+
+def _cjk_style_dir(work_dir: Path, cjk_font: str) -> Path:
+    style_dir = work_dir / "obsidian-export-cjk-style"
+    style_dir.mkdir(parents=True, exist_ok=True)
+    default_header = resources.files("obsidian_export") / "assets" / "styles" / "default" / "header.tex"
+    template = default_header.read_text(encoding="utf-8")
+    cjk_block = f"""
+
+% CJK line breaking and font support for long Chinese/Japanese/Korean runs.
+\\XeTeXlinebreaklocale "zh"
+\\XeTeXlinebreakskip = 0pt plus 1pt
+\\emergencystretch=3em
+\\sloppy
+"""
+    if "CJK line breaking and font support" not in template:
+        template = template.replace("{font_block}", "{font_block}" + cjk_block)
+    (style_dir / "header.tex").write_text(template, encoding="utf-8")
+    return style_dir
+
+
+def _available_font_name(candidates: tuple[str, ...]) -> str:
+    font_names = _installed_windows_font_names()
+    for candidate in candidates:
+        if candidate.lower() in font_names:
+            return candidate
+    return candidates[-1]
+
+
+def _installed_windows_font_names() -> set[str]:
+    fonts_dir = Path(os.environ.get("WINDIR", r"C:\Windows")) / "Fonts"
+    if not fonts_dir.is_dir():
+        return set()
+    names: set[str] = set()
+    for path in fonts_dir.iterdir():
+        lower = path.name.lower()
+        if lower.startswith("notosanssc"):
+            names.add("noto sans sc")
+        elif lower.startswith("notoserifsc"):
+            names.add("noto serif sc")
+        elif lower.startswith("msyh"):
+            names.update({"microsoft yahei", "microsoft yahei ui"})
+        elif lower.startswith("deng"):
+            names.add("dengxian")
+        elif lower.startswith("simsun"):
+            names.add("simsun")
+        elif lower.startswith("simhei"):
+            names.add("simhei")
+        elif lower.startswith("consola"):
+            names.add("consolas")
+        elif lower.startswith("cascadia"):
+            names.add("cascadia mono")
+        elif lower.startswith("cour"):
+            names.add("courier new")
+    return names
 
 
 def _looks_like_missing_profile(completed: subprocess.CompletedProcess[str]) -> bool:

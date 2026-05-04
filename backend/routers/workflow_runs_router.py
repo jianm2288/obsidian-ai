@@ -2,9 +2,12 @@ import json
 import logging
 import time
 import asyncio
+import re
 from contextlib import AsyncExitStack
 from datetime import datetime, timezone
+from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import FileResponse, Response
 from sqlalchemy.orm import Session as DBSession
 from sse_starlette.sse import EventSourceResponse
 
@@ -21,6 +24,7 @@ from llm.base import LLMMessage
 from llm.provider_factory import create_provider_from_config
 from mcp_client import connect_mcp_server, parse_mcp_tool_name, MCPConnection
 from workflow_autosave import auto_save_workflow_output_sqlite
+from export_tools import EXPORT_DIR, _safe_slug
 from builtin_tools import BUILTIN_TOOL_SCHEMAS, execute_builtin_tool, is_builtin_tool
 from file_storage import FileStorageService
 from rag_service import RAGService
@@ -652,6 +656,62 @@ def _run_to_response(run, is_mongo=False):
     )
 
 
+def _format_transcript_time(value) -> str:
+    if not value:
+        return "Not completed"
+    if isinstance(value, str):
+        return value
+    try:
+        return value.isoformat()
+    except AttributeError:
+        return str(value)
+
+
+def _workflow_run_transcript(workflow_name: str, run_data: dict) -> str:
+    started_at = run_data.get("started_at")
+    completed_at = run_data.get("completed_at")
+    lines = [
+        f"# Workflow Run: {workflow_name}",
+        "",
+        f"- Run ID: {run_data.get('id')}",
+        f"- Status: {run_data.get('status')}",
+        f"- Started: {_format_transcript_time(started_at)}",
+        f"- Completed: {_format_transcript_time(completed_at)}",
+    ]
+
+    input_text = run_data.get("input_text")
+    if input_text:
+        lines.extend(["", "## Input", "", str(input_text)])
+
+    for step in run_data.get("steps") or []:
+        lines.extend([
+            "",
+            f"## Step {step.get('order')}: {step.get('agent_name') or 'Workflow Step'}",
+            "",
+            f"- Status: {step.get('status')}",
+            "",
+            "### Task",
+            "",
+            str(step.get("task") or ""),
+        ])
+        if step.get("output"):
+            lines.extend(["", "### Output", "", str(step["output"])])
+        if step.get("error"):
+            lines.extend(["", "### Error", "", str(step["error"])])
+
+    if run_data.get("final_output"):
+        lines.extend(["", "## Final Output", "", str(run_data["final_output"])])
+    if run_data.get("error"):
+        lines.extend(["", "## Run Error", "", str(run_data["error"])])
+
+    return "\n".join(lines).strip() + "\n"
+
+
+def _workflow_transcript_filename(workflow_name: str, run_id: str, suffix: str) -> str:
+    slug = _safe_slug(f"{workflow_name}-run-{run_id}") or "workflow-run"
+    return f"{slug}.{suffix}"
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -760,6 +820,68 @@ async def get_workflow_run(
     return _run_to_response(run)
 
 
+@router.get("/workflow-runs/{run_id}/transcript")
+async def export_workflow_run_transcript(
+    run_id: str,
+    format: str = "markdown",
+    current_user: TokenData = Depends(get_current_user),
+    db: DBSession = Depends(get_db),
+):
+    export_format = format.strip().lower()
+    if export_format in {"md", "markdown"}:
+        export_format = "markdown"
+    elif export_format != "pdf":
+        raise HTTPException(status_code=400, detail="format must be markdown or pdf")
+
+    if DATABASE_TYPE == "mongo":
+        mongo_db = get_database()
+        run = await WorkflowRunCollection.find_by_id(mongo_db, run_id)
+        if not run or run.get("user_id") != current_user.user_id:
+            raise HTTPException(status_code=404, detail="Workflow run not found")
+        workflow = await WorkflowCollection.find_by_id(mongo_db, str(run.get("workflow_id")))
+        workflow_name = workflow.get("name") if workflow else "Workflow"
+        run_data = _run_to_response(run, is_mongo=True).model_dump()
+    else:
+        run = db.query(WorkflowRun).filter(
+            WorkflowRun.id == int(run_id),
+            WorkflowRun.user_id == int(current_user.user_id),
+        ).first()
+        if not run:
+            raise HTTPException(status_code=404, detail="Workflow run not found")
+        workflow = db.query(Workflow).filter(Workflow.id == run.workflow_id).first()
+        workflow_name = workflow.name if workflow else "Workflow"
+        run_data = _run_to_response(run).model_dump()
+
+    transcript = _workflow_run_transcript(workflow_name, run_data)
+    filename = _workflow_transcript_filename(workflow_name, run_id, "md")
+    if export_format == "markdown":
+        return Response(
+            transcript,
+            media_type="text/markdown; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    from premium_export_tools import obsidian_export_pdf
+
+    result = await asyncio.to_thread(
+        obsidian_export_pdf,
+        {
+            "title": f"{workflow_name} Workflow Run",
+            "content_markdown": transcript,
+            "filename": _workflow_transcript_filename(workflow_name, run_id, "pdf"),
+            "timeout_seconds": 180,
+        },
+    )
+    if not result.get("ok"):
+        raise HTTPException(status_code=500, detail=result.get("error") or "PDF export failed")
+
+    output_path = Path(str(result.get("path") or "")).resolve()
+    export_root = EXPORT_DIR.resolve()
+    if export_root not in output_path.parents or not output_path.is_file():
+        raise HTTPException(status_code=500, detail="PDF export did not produce a readable file")
+    return FileResponse(output_path, media_type="application/pdf", filename=output_path.name)
+
+
 # ---------------------------------------------------------------------------
 # SQLite execution
 # ---------------------------------------------------------------------------
@@ -789,7 +911,7 @@ async def _run_workflow_sqlite(workflow_id, data, current_user, db):
             agent = db.query(Agent).filter(Agent.id == int(s["agent_id"])).first()
         step_results.append({
             "order": s["order"],
-            "agent_id": s["agent_id"],
+            "agent_id": s.get("agent_id"),
             "agent_name": agent.name if agent else node_type.capitalize(),
             "task": s["task"],
             "status": "pending",
@@ -1113,6 +1235,39 @@ def _format_dag_input(task: str, upstream_outputs: dict[str, str], user_input: s
     return f"Task: {task}\n\nUpstream context:\n{sections}"
 
 
+def _error_message(exc: BaseException) -> str:
+    return str(exc).strip() or type(exc).__name__
+
+
+def _is_transient_agent_error(exc: BaseException) -> bool:
+    transient_names = {
+        "ConnectError",
+        "ConnectTimeout",
+        "NetworkError",
+        "PoolTimeout",
+        "ReadError",
+        "ReadTimeout",
+        "RemoteProtocolError",
+        "TimeoutException",
+    }
+    return type(exc).__name__ in transient_names
+
+
+def _route_pm_decision(text: str, branches: list[str]) -> str | None:
+    match = re.search(
+        r"(?im)^\s*(?:\*\*)?\s*Decision\s*:\s*(APPROVED|CONDITIONALLY_APPROVED|REVISE)\b",
+        text or "",
+    )
+    if not match:
+        return None
+    decision = match.group(1).upper()
+    target = "revise" if decision == "REVISE" else "approved"
+    for branch in branches:
+        if branch.lower() == target:
+            return branch
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Condition evaluation helper
 # ---------------------------------------------------------------------------
@@ -1175,6 +1330,14 @@ async def _execute_dag_sqlite(run, workflow, steps, user_input, db):
     """SSE generator — executes a DAG workflow with parallel node firing."""
     import asyncio
     run_id = run.id
+    try:
+        workflow_config = json.loads(workflow.config_json or "{}")
+    except Exception:
+        workflow_config = {}
+    try:
+        max_parallel_nodes = int(workflow_config.get("max_parallel_nodes") or 0)
+    except (TypeError, ValueError):
+        max_parallel_nodes = 0
 
     # Index steps by their node ID
     node_map = {s["id"]: s for s in steps}
@@ -1274,7 +1437,12 @@ async def _execute_dag_sqlite(run, workflow, steps, user_input, db):
             cfg = s.get("config") or {}
             branches = cfg.get("branches") or []
             condition_prompt = cfg.get("condition_prompt") or s.get("task") or ""
-            chosen = await _evaluate_condition(upstream, user_input, branches, condition_prompt, db)
+            chosen = None
+            if cfg.get("decision_source") == "pm_decision_line":
+                decision_text = "\n\n".join(upstream.values())
+                chosen = _route_pm_decision(decision_text, branches)
+            if not chosen:
+                chosen = await _evaluate_condition(upstream, user_input, branches, condition_prompt, db)
             condition_outputs[node_id] = chosen
             outputs[node_id] = chosen  # so downstream can reference it too
 
@@ -1287,6 +1455,17 @@ async def _execute_dag_sqlite(run, workflow, steps, user_input, db):
                     if dep_branch != chosen:
                         skipped.add(other_id)
                         step_results_by_id[other_id]["status"] = "skipped"
+
+            changed = True
+            while changed:
+                changed = False
+                for other_id, other_s in node_map.items():
+                    if other_id in completed or other_id in skipped or other_id in in_flight:
+                        continue
+                    if any(dep in skipped for dep in (other_s.get("depends_on") or [])):
+                        skipped.add(other_id)
+                        step_results_by_id[other_id]["status"] = "skipped"
+                        changed = True
 
             step_results_by_id[node_id]["status"] = "completed"
             step_results_by_id[node_id]["output"] = chosen
@@ -1421,10 +1600,20 @@ async def _execute_dag_sqlite(run, workflow, steps, user_input, db):
             return True
 
         except Exception as e:
+            error_message = _error_message(e)
+            if _is_transient_agent_error(e) and int(s.get("_transient_retry_count") or 0) < 1:
+                s["_transient_retry_count"] = 1
+                logger.warning(
+                    "Retrying workflow node %s after transient error: %s",
+                    node_id,
+                    error_message,
+                )
+                await asyncio.sleep(2)
+                return await run_node(node_id)
             step_results_by_id[node_id]["status"] = "failed"
-            step_results_by_id[node_id]["error"] = str(e)
+            step_results_by_id[node_id]["error"] = error_message
             step_results_by_id[node_id]["completed_at"] = datetime.now(timezone.utc).isoformat()
-            await sse_queue.put({"event": "node_error", "node_id": node_id, "error": str(e)})
+            await sse_queue.put({"event": "node_error", "node_id": node_id, "error": error_message})
             return False
 
     try:
@@ -1453,6 +1642,10 @@ async def _execute_dag_sqlite(run, workflow, steps, user_input, db):
                 and nid not in skipped
                 and _node_ready(nid)
             ]
+            ready.sort(key=lambda nid: node_map[nid].get("order", 0))
+            if max_parallel_nodes > 0:
+                slots = max_parallel_nodes - len(in_flight)
+                ready = ready[:max(0, slots)]
 
             for nid in ready:
                 in_flight.add(nid)
@@ -1521,7 +1714,10 @@ async def _execute_dag_sqlite(run, workflow, steps, user_input, db):
                             _update({"running_nodes_json": json.dumps(list(in_flight)), "steps_json": _snapshot(), "status": "failed", "error": event.get("error", "")})
                             yield {"event": "node_error", "data": json.dumps(event)}
                 else:
-                    break  # all tasks done
+                    # Fast nodes, especially condition routers, can complete during
+                    # the first queue drain. Let the ready-node check below decide
+                    # whether their chosen branch should run next.
+                    pass
 
             # Deadlock guard: if nothing is in-flight and nothing is ready, stop
             new_ready = [
@@ -1533,7 +1729,24 @@ async def _execute_dag_sqlite(run, workflow, steps, user_input, db):
             if not in_flight and not new_ready:
                 break
 
-        if failed:
+        blocked = sorted(
+            all_node_ids - completed - skipped - failed,
+            key=lambda nid: node_map[nid].get("order", 0),
+        )
+        if blocked and not failed:
+            error_message = f"Workflow stalled with pending nodes: {', '.join(blocked)}"
+            for nid in blocked:
+                step_results_by_id[nid]["status"] = "failed"
+                step_results_by_id[nid]["error"] = error_message
+            _update({
+                "status": "failed",
+                "error": error_message,
+                "completed_at": datetime.now(timezone.utc),
+                "steps_json": _snapshot(),
+                "running_nodes_json": "[]",
+            })
+            yield {"event": "workflow_error", "data": json.dumps({"run_id": str(run_id), "error": error_message})}
+        elif failed:
             _update({"status": "failed", "completed_at": datetime.now(timezone.utc), "steps_json": _snapshot()})
             yield {"event": "workflow_error", "data": json.dumps({"run_id": str(run_id), "error": "One or more nodes failed"})}
         else:

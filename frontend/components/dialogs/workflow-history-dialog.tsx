@@ -8,7 +8,6 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
-import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { apiClient } from "@/lib/api-client"
 import type { Workflow, WorkflowRun, Agent } from "@/types/playground"
@@ -19,6 +18,8 @@ import {
   Loader2,
   ChevronDown,
   ChevronRight,
+  Printer,
+  Save,
   Trash2,
 } from "lucide-react"
 import { MarkdownRenderer } from "@/components/playground/chat/markdown-renderer"
@@ -54,14 +55,53 @@ const statusConfig = {
   running: { icon: Loader2, color: "text-blue-500", bg: "bg-blue-500/10", label: "Running" },
   completed: { icon: CheckCircle2, color: "text-green-500", bg: "bg-green-500/10", label: "Completed" },
   failed: { icon: XCircle, color: "text-red-500", bg: "bg-red-500/10", label: "Failed" },
+  skipped: { icon: XCircle, color: "text-muted-foreground", bg: "bg-muted/40", label: "Skipped" },
   cancelled: { icon: XCircle, color: "text-amber-500", bg: "bg-amber-500/10", label: "Cancelled" },
+}
+
+function sanitizeFilename(value: string): string {
+  return value
+    .replace(/[^a-z0-9\-_ ]/gi, "_")
+    .replace(/\s+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^[-_]+|[-_]+$/g, "")
+    .slice(0, 80) || "workflow-run"
+}
+
+type SaveFilePickerWindow = Window & {
+  showSaveFilePicker?: (options: {
+    suggestedName?: string
+    types?: Array<{
+      description: string
+      accept: Record<string, string[]>
+    }>
+  }) => Promise<{
+    createWritable: () => Promise<{
+      write: (data: Blob) => Promise<void>
+      close: () => Promise<void>
+    }>
+  }>
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException && error.name === "AbortError"
+}
+
+function downloadBlob(blob: Blob, filename: string): void {
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement("a")
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
+  URL.revokeObjectURL(url)
 }
 
 export function WorkflowHistoryDialog({
   open,
   onOpenChange,
   workflow,
-  agents,
 }: WorkflowHistoryDialogProps) {
   const [runs, setRuns] = useState<WorkflowRun[]>([])
   const [loading, setLoading] = useState(false)
@@ -69,16 +109,32 @@ export function WorkflowHistoryDialog({
   const [deletingRunId, setDeletingRunId] = useState<string | null>(null)
 
   useEffect(() => {
+    let cancelled = false
     if (open && workflow) {
-      setLoading(true)
+      queueMicrotask(() => {
+        if (!cancelled) setLoading(true)
+      })
       apiClient
         .listWorkflowRuns(workflow.id)
-        .then((data) => setRuns(data))
-        .catch(() => setRuns([]))
-        .finally(() => setLoading(false))
+        .then((data) => {
+          if (!cancelled) setRuns(data)
+        })
+        .catch(() => {
+          if (!cancelled) setRuns([])
+        })
+        .finally(() => {
+          if (!cancelled) setLoading(false)
+        })
     } else {
-      setRuns([])
-      setExpandedRunId(null)
+      queueMicrotask(() => {
+        if (cancelled) return
+        setRuns([])
+        setExpandedRunId(null)
+        setLoading(false)
+      })
+    }
+    return () => {
+      cancelled = true
     }
   }, [open, workflow])
 
@@ -96,10 +152,59 @@ export function WorkflowHistoryDialog({
     }
   }
 
-  if (!workflow) return null
+  const handleSaveRun = async (e: React.MouseEvent, run: WorkflowRun) => {
+    e.stopPropagation()
+    if (!workflow) return
+    try {
+      const transcript = await apiClient.getWorkflowRunTranscript(run.id)
+      const blob = new Blob([transcript], { type: "text/markdown;charset=utf-8" })
+      const started = new Date(run.started_at).toISOString().slice(0, 19).replace(/[:T]/g, "-")
+      const filename = `${sanitizeFilename(workflow.name)}-${started}-run-${run.id}.md`
+      const picker = (window as SaveFilePickerWindow).showSaveFilePicker
+      if (picker) {
+        try {
+          const handle = await picker({
+            suggestedName: filename,
+            types: [
+              {
+                description: "Markdown",
+                accept: { "text/markdown": [".md", ".markdown"] },
+              },
+            ],
+          })
+          const writable = await handle.createWritable()
+          await writable.write(blob)
+          await writable.close()
+          return
+        } catch (error) {
+          if (isAbortError(error)) return
+        }
+      }
+      downloadBlob(blob, filename)
+    } catch (error) {
+      alert(error instanceof Error ? error.message : "Failed to save workflow transcript")
+    }
+  }
 
-  const getAgentName = (agentId: string) =>
-    agents.find((a) => a.id === agentId)?.name || "Unknown"
+  const handlePrintRun = async (e: React.MouseEvent, run: WorkflowRun) => {
+    e.stopPropagation()
+    if (!workflow) return
+    try {
+      const pdf = await apiClient.getWorkflowRunTranscriptPdf(run.id)
+      const url = URL.createObjectURL(pdf)
+      const printWindow = window.open(url, "_blank", "width=900,height=700")
+      if (printWindow) {
+        printWindow.addEventListener("load", () => printWindow.print(), { once: true })
+        window.setTimeout(() => URL.revokeObjectURL(url), 60_000)
+      } else {
+        downloadBlob(pdf, `${sanitizeFilename(workflow.name)}-run-${run.id}.pdf`)
+      }
+    } catch (error) {
+      alert(error instanceof Error ? error.message : "Failed to render workflow PDF")
+    }
+  }
+
+  if (!workflow) return null
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -168,17 +273,33 @@ export function WorkflowHistoryDialog({
                           </div>
                         </div>
                       </button>
-                      <button
-                        className="p-2 mr-1 opacity-0 group-hover/run:opacity-100 transition-opacity hover:text-destructive text-muted-foreground"
-                        onClick={(e) => handleDeleteRun(e, run.id)}
-                        disabled={deletingRunId === run.id}
-                        title="Delete run"
-                      >
-                        {deletingRunId === run.id
-                          ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                          : <Trash2 className="h-3.5 w-3.5" />
-                        }
-                      </button>
+                      <div className="flex items-center gap-0.5 pr-1 opacity-0 group-hover/run:opacity-100 transition-opacity">
+                        <button
+                          className="p-2 hover:text-foreground text-muted-foreground"
+                          onClick={(e) => handleSaveRun(e, run)}
+                          title="Save run transcript"
+                        >
+                          <Save className="h-3.5 w-3.5" />
+                        </button>
+                        <button
+                          className="p-2 hover:text-foreground text-muted-foreground"
+                          onClick={(e) => handlePrintRun(e, run)}
+                          title="Print run transcript"
+                        >
+                          <Printer className="h-3.5 w-3.5" />
+                        </button>
+                        <button
+                          className="p-2 hover:text-destructive text-muted-foreground"
+                          onClick={(e) => handleDeleteRun(e, run.id)}
+                          disabled={deletingRunId === run.id}
+                          title="Delete run"
+                        >
+                          {deletingRunId === run.id
+                            ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            : <Trash2 className="h-3.5 w-3.5" />
+                          }
+                        </button>
+                      </div>
                     </div>
 
                     {/* Expanded detail */}

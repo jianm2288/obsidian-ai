@@ -297,7 +297,7 @@ export interface WorkflowStepResult {
   agent_id: string
   agent_name: string
   task: string
-  status: "pending" | "running" | "completed" | "failed"
+  status: "pending" | "running" | "completed" | "failed" | "skipped"
   output?: string
   started_at?: string
   completed_at?: string

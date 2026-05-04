@@ -223,13 +223,15 @@ def _sync_user_workspace(db: Session, user: User, seed: dict[str, Any]) -> dict[
         steps = []
         for step in item.get("steps", []):
             agent_name = step.get("agent_name")
-            agent_id = agent_ids.get(agent_name)
-            if not agent_id:
+            agent_id = agent_ids.get(agent_name) if agent_name else None
+            node_type = step.get("node_type", "agent")
+            if node_type == "agent" and not agent_id:
                 logger.warning("Skipping workflow step for missing agent %r", agent_name)
                 continue
             resolved_step = dict(step)
             resolved_step.pop("agent_name", None)
-            resolved_step["agent_id"] = str(agent_id)
+            if agent_id:
+                resolved_step["agent_id"] = str(agent_id)
             steps.append(resolved_step)
 
         config = dict(item.get("config") or {})
