@@ -12,6 +12,7 @@ import {
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import { Textarea } from "@/components/ui/textarea"
 import {
   Select,
   SelectContent,
@@ -57,6 +58,7 @@ export function ProviderDialog({ open, onOpenChange, provider, onUpdated }: Prov
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState("")
   const [testStatus, setTestStatus] = useState<"idle" | "testing" | "connected" | "failed">("idle")
+  const [configJson, setConfigJson] = useState("")
 
   // Secret selection state
   const [keySource, setKeySource] = useState<"manual" | "secret">("manual")
@@ -73,6 +75,11 @@ export function ProviderDialog({ open, onOpenChange, provider, onUpdated }: Prov
       setProviderType(provider.provider_type)
       setBaseUrl(provider.base_url ?? "")
       setApiKey("")
+      setConfigJson(
+        provider.config && Object.keys(provider.config).length > 0
+          ? JSON.stringify(provider.config, null, 2)
+          : ""
+      )
       setTestStatus("idle")
       setError("")
       if (provider.secret_id) {
@@ -123,6 +130,18 @@ export function ProviderDialog({ open, onOpenChange, provider, onUpdated }: Prov
           base_url: baseUrl || undefined,
         }
 
+        if (configJson.trim()) {
+          try {
+            payload.config = JSON.parse(configJson)
+          } catch {
+            setError("Invalid JSON in advanced config")
+            setLoading(false)
+            return
+          }
+        } else {
+          payload.config = {}
+        }
+
         if (selectedType?.needsKey) {
           if (keySource === "secret" && selectedSecretId) {
             payload.secret_id = selectedSecretId
@@ -142,6 +161,16 @@ export function ProviderDialog({ open, onOpenChange, provider, onUpdated }: Prov
           name,
           provider_type: providerType,
           base_url: baseUrl || undefined,
+        }
+
+        if (configJson.trim()) {
+          try {
+            payload.config = JSON.parse(configJson)
+          } catch {
+            setError("Invalid JSON in advanced config")
+            setLoading(false)
+            return
+          }
         }
 
         if (selectedType?.needsKey) {
@@ -170,6 +199,7 @@ export function ProviderDialog({ open, onOpenChange, provider, onUpdated }: Prov
     setProviderType("")
     setBaseUrl("")
     setApiKey("")
+    setConfigJson("")
     setKeySource("manual")
     setSelectedSecretId("")
     setTestStatus("idle")
@@ -291,6 +321,22 @@ export function ProviderDialog({ open, onOpenChange, provider, onUpdated }: Prov
               )}
             </div>
           )}
+
+          <div className="grid gap-2">
+            <Label htmlFor="provider-config-json">Advanced Config (JSON)</Label>
+            <Textarea
+              id="provider-config-json"
+              value={configJson}
+              onChange={(e) => setConfigJson(e.target.value)}
+              placeholder={"{\n  \"temperature\": 0.25,\n  \"num_ctx\": 4096\n}"}
+              rows={7}
+              className="font-mono text-xs"
+            />
+            <p className="text-xs text-muted-foreground">
+              Optional provider options. For Ollama, this supports keys like temperature, top_p,
+              repeat_penalty, num_ctx, num_gpu, num_thread, and num_batch.
+            </p>
+          </div>
 
           {/* Connection test status */}
           {testStatus !== "idle" && (

@@ -60,14 +60,33 @@ class OllamaProvider(BaseLLMProvider):
                 msgs.append(msg)
         return msgs
 
+    def _apply_generation_options(self, payload: dict) -> None:
+        """Map provider config values into Ollama "options" payload."""
+        option_keys = (
+            "temperature",
+            "top_p",
+            "repeat_penalty",
+            "num_ctx",
+            "num_gpu",
+            "num_thread",
+            "num_batch",
+            "num_predict",
+            "seed",
+            "stop",
+        )
+
+        for key in option_keys:
+            value = self.config.get(key)
+            if value is not None:
+                payload.setdefault("options", {})[key] = value
+
     async def chat(self, messages, system_prompt=None, tools=None) -> LLMMessage:
         payload = {
             "model": self.model_id,
             "messages": self._build_messages(messages, system_prompt),
             "stream": False,
         }
-        if self.config.get("temperature") is not None:
-            payload.setdefault("options", {})["temperature"] = self.config["temperature"]
+        self._apply_generation_options(payload)
         if tools:
             payload["tools"] = tools
 
@@ -100,8 +119,7 @@ class OllamaProvider(BaseLLMProvider):
             "messages": self._build_messages(messages, system_prompt),
             "stream": True,
         }
-        if self.config.get("temperature") is not None:
-            payload.setdefault("options", {})["temperature"] = self.config["temperature"]
+        self._apply_generation_options(payload)
         if tools:
             payload["tools"] = tools
 
