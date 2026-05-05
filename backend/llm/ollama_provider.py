@@ -163,6 +163,10 @@ class OllamaProvider(BaseLLMProvider):
                                 ),
                             )
 
+                    thinking = message.get("thinking", "")
+                    if thinking:
+                        yield LLMStreamChunk(type="reasoning", reasoning=thinking)
+
                     content = message.get("content", "")
                     if not content:
                         continue

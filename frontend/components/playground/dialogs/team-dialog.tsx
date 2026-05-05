@@ -24,20 +24,25 @@ import { createTeam, updateTeam } from "@/app/api/playground"
 import { apiClient } from "@/lib/api-client"
 import { usePlaygroundStore } from "@/stores/playground-store"
 import { Loader2, Check, CheckCircle2, Circle, Terminal, Play, Square } from "lucide-react"
-import type { Team } from "@/types/playground"
+import type { Agent, Team } from "@/types/playground"
 
 interface TeamDialogProps {
   open: boolean
   onOpenChange: (open: boolean) => void
   team?: Team | null
+  agents?: Agent[]
+  teams?: Team[]
+  onSaved?: (team: Team) => void
 }
 
-export function TeamDialog({ open, onOpenChange, team }: TeamDialogProps) {
+export function TeamDialog({ open, onOpenChange, team, agents: agentsProp, teams: teamsProp, onSaved }: TeamDialogProps) {
   const { data: session } = useSession()
-  const agents = usePlaygroundStore((s) => s.agents)
-  const teams = usePlaygroundStore((s) => s.teams)
+  const storeAgents = usePlaygroundStore((s) => s.agents)
+  const storeTeams = usePlaygroundStore((s) => s.teams)
   const setTeams = usePlaygroundStore((s) => s.setTeams)
   const setSelectedTeam = usePlaygroundStore((s) => s.setSelectedTeam)
+  const agents = agentsProp ?? storeAgents
+  const teams = teamsProp ?? storeTeams
 
   const [name, setName] = useState("")
   const [description, setDescription] = useState("")
@@ -88,10 +93,12 @@ export function TeamDialog({ open, onOpenChange, team }: TeamDialogProps) {
       if (isEditing && team) {
         const updated = await updateTeam(session.accessToken, team.id, payload)
         setTeams(teams.map((t) => (t.id === updated.id ? updated : t)))
+        onSaved?.(updated)
       } else {
         const newTeam = await createTeam(session.accessToken, payload)
         setTeams([...teams, newTeam])
         setSelectedTeam(newTeam.id)
+        onSaved?.(newTeam)
       }
 
       resetForm()

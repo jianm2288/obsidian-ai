@@ -3,7 +3,7 @@ import json
 import logging
 import re
 import time
-from contextlib import AsyncExitStack
+from contextlib import AsyncExitStack, asynccontextmanager
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session as DBSession
 from sse_starlette.sse import EventSourceResponse
@@ -502,55 +502,64 @@ class _TraceContext:
                         stop_reason: str | None = None):
         if not self.db:
             return
-        input_tokens = usage.get("input_tokens", 0)
-        output_tokens = usage.get("output_tokens", 0)
-        cache_read_tokens = usage.get("cache_read_input_tokens", 0) or 0
-        cache_creation_tokens = usage.get("cache_creation_input_tokens", 0) or 0
-        cost_usd = _estimate_cost_usd(model_name, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens)
-        span = TraceSpan(
-            session_id=self.session_id,
-            workflow_run_id=self.workflow_run_id,
-            span_type="llm_call",
-            name=model_name,
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            cache_read_tokens=cache_read_tokens,
-            cache_creation_tokens=cache_creation_tokens,
-            cost_usd=cost_usd,
-            duration_ms=duration_ms,
-            status="success",
-            stop_reason=stop_reason,
-            input_data=json.dumps({"prompt_preview": prompt_preview[:5000]}),
-            output_data=json.dumps({"response_preview": response_preview[:5000]}),
-            sequence=self._next_seq(),
-            round_number=round_number,
-        )
-        self.db.add(span)
-        self.db.commit()
+        try:
+            input_tokens = usage.get("input_tokens", 0)
+            output_tokens = usage.get("output_tokens", 0)
+            cache_read_tokens = usage.get("cache_read_input_tokens", 0) or 0
+            cache_creation_tokens = usage.get("cache_creation_input_tokens", 0) or 0
+            span_name = model_name or "unknown-model"
+            cost_usd = _estimate_cost_usd(span_name, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens)
+            span = TraceSpan(
+                session_id=self.session_id,
+                workflow_run_id=self.workflow_run_id,
+                span_type="llm_call",
+                name=span_name,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cache_read_tokens=cache_read_tokens,
+                cache_creation_tokens=cache_creation_tokens,
+                cost_usd=cost_usd,
+                duration_ms=duration_ms,
+                status="success",
+                stop_reason=stop_reason,
+                input_data=json.dumps({"prompt_preview": prompt_preview[:5000]}),
+                output_data=json.dumps({"response_preview": response_preview[:5000]}),
+                sequence=self._next_seq(),
+                round_number=round_number,
+            )
+            self.db.add(span)
+            self.db.commit()
+        except Exception as e:
+            self.db.rollback()
+            logger.warning("Failed to record LLM trace span: %s", e)
 
     def record_tool_span(self, tool_name: str, arguments_str: str, result: str,
                          duration_ms: int, round_number: int = 0,
                          span_type: str = "tool_call", status: str = "success"):
         if not self.db:
             return
-        span = TraceSpan(
-            session_id=self.session_id,
-            workflow_run_id=self.workflow_run_id,
-            span_type=span_type,
-            name=tool_name,
-            input_tokens=0,
-            output_tokens=0,
-            cache_read_tokens=0,
-            cache_creation_tokens=0,
-            duration_ms=duration_ms,
-            status=status,
-            input_data=json.dumps({"arguments": arguments_str[:5000]}),
-            output_data=json.dumps({"result": str(result)[:5000]}),
-            sequence=self._next_seq(),
-            round_number=round_number,
-        )
-        self.db.add(span)
-        self.db.commit()
+        try:
+            span = TraceSpan(
+                session_id=self.session_id,
+                workflow_run_id=self.workflow_run_id,
+                span_type=span_type,
+                name=tool_name or "unknown-tool",
+                input_tokens=0,
+                output_tokens=0,
+                cache_read_tokens=0,
+                cache_creation_tokens=0,
+                duration_ms=duration_ms,
+                status=status,
+                input_data=json.dumps({"arguments": (arguments_str or "")[:5000]}),
+                output_data=json.dumps({"result": str(result)[:5000]}),
+                sequence=self._next_seq(),
+                round_number=round_number,
+            )
+            self.db.add(span)
+            self.db.commit()
+        except Exception as e:
+            self.db.rollback()
+            logger.warning("Failed to record tool trace span: %s", e)
 
 
 async def _save_trace_span_mongo(mongo_db, data: dict):
@@ -1198,9 +1207,38 @@ async def _connect_mcp_servers(stack: AsyncExitStack, mcp_server_configs: list[d
                 }
             mcp_connections[conn.server_name] = conn
             all_mcp_tools.extend(conn.tools)
-        except Exception as e:
-            logger.warning(f"Failed to connect to MCP server {config.get('name')}: {e}")
+        except asyncio.CancelledError:
+            raise
+        except BaseException as e:
+            logger.warning("Failed to connect to MCP server %s: %s", config.get("name"), _brief_exception(e))
     return mcp_connections, all_mcp_tools
+
+
+def _brief_exception(exc: BaseException) -> str:
+    """Flatten ExceptionGroup noise from MCP task groups into useful text."""
+    if isinstance(exc, BaseExceptionGroup):
+        parts = [_brief_exception(e) for e in exc.exceptions[:3]]
+        suffix = "" if len(exc.exceptions) <= 3 else f" (+{len(exc.exceptions) - 3} more)"
+        return f"{type(exc).__name__}: {'; '.join(parts)}{suffix}"
+    return f"{type(exc).__name__}: {exc}"
+
+
+async def _close_mcp_stack(stack: AsyncExitStack) -> None:
+    try:
+        await stack.aclose()
+    except asyncio.CancelledError:
+        raise
+    except BaseException as e:
+        logger.warning("MCP cleanup failed: %s", _brief_exception(e))
+
+
+@asynccontextmanager
+async def _managed_mcp_stack():
+    stack = AsyncExitStack()
+    try:
+        yield stack
+    finally:
+        await _close_mcp_stack(stack)
 
 
 # ---------------------------------------------------------------------------
@@ -2601,7 +2639,7 @@ async def _stream_response_with_mcp(llm, messages, system_prompt, db, session_id
     # Inject the virtual create_tool schema if the agent allows tool creation
     native_tools = _inject_create_tool_schema(native_tools, agent)
 
-    async with AsyncExitStack() as stack:
+    async with _managed_mcp_stack() as stack:
         mcp_connections, all_mcp_tools = await _connect_mcp_servers(stack, mcp_server_configs)
         tools = _merge_tools(native_tools, all_mcp_tools)
 
@@ -2968,7 +3006,7 @@ async def _stream_response_with_mcp(llm, messages, system_prompt, db, session_id
                 )
                 db.add(assistant_msg)
                 db.commit()
-            yield {"event": "error", "data": json.dumps({"error": str(e)})}
+            yield {"event": "error", "data": json.dumps({"error": _brief_exception(e)})}
 
 
 # ---------------------------------------------------------------------------
@@ -3068,7 +3106,7 @@ async def _chat_with_tools_mongo(llm, messages: list, system_prompt: str | None,
 
 async def _chat_with_tools_and_mcp(llm, messages: list, system_prompt: str | None, tools: list | None, db, mcp_server_configs: list[dict]) -> str:
     """Non-streaming chat with MCP + native tool execution loop (SQLite)."""
-    async with AsyncExitStack() as stack:
+    async with _managed_mcp_stack() as stack:
         mcp_connections, all_mcp_tools = await _connect_mcp_servers(stack, mcp_server_configs)
         merged_tools = _merge_tools(tools, all_mcp_tools)
 
@@ -3090,7 +3128,7 @@ async def _chat_with_tools_and_mcp(llm, messages: list, system_prompt: str | Non
 
 async def _chat_with_tools_and_mcp_mongo(llm, messages: list, system_prompt: str | None, tools: list | None, mongo_db, mcp_server_configs: list[dict]) -> str:
     """Non-streaming chat with MCP + native tool execution loop (MongoDB)."""
-    async with AsyncExitStack() as stack:
+    async with _managed_mcp_stack() as stack:
         mcp_connections, all_mcp_tools = await _connect_mcp_servers(stack, mcp_server_configs)
         merged_tools = _merge_tools(tools, all_mcp_tools)
 
@@ -3209,7 +3247,7 @@ async def _team_chat_coordinate(agents_with_providers, messages, db, session_id,
                 yield event
 
     except Exception as e:
-        yield {"event": "error", "data": json.dumps({"error": str(e)})}
+        yield {"event": "error", "data": json.dumps({"error": _brief_exception(e)})}
 
 
 async def _team_chat_route(agents_with_providers, messages, db, session_id, start_time, user_message):
@@ -3342,7 +3380,7 @@ async def _team_chat_route(agents_with_providers, messages, db, session_id, star
         yield {"event": "done", "data": "{}"}
 
     except Exception as e:
-        yield {"event": "error", "data": json.dumps({"error": str(e)})}
+        yield {"event": "error", "data": json.dumps({"error": _brief_exception(e)})}
 
 
 def _prepend_team_context(system_prompt: str | None, note: str) -> str:
@@ -3469,7 +3507,7 @@ async def _team_chat_collaborate(agents_with_providers, messages, db, session_id
                 }
 
     except Exception as e:
-        yield {"event": "error", "data": json.dumps({"error": str(e)})}
+        yield {"event": "error", "data": json.dumps({"error": _brief_exception(e)})}
 
 
 async def _build_tools_for_llm_mongo(agent, mongo_db) -> list[dict] | None:
@@ -4115,7 +4153,7 @@ async def _stream_response_mongo(llm, messages, system_prompt, mongo_db, session
                 "session_id": session_id, "role": "assistant", "content": full_content,
                 "agent_id": agent_id, "metadata_json": json.dumps({"error": str(e)}),
             })
-        yield {"event": "error", "data": json.dumps({"error": str(e)})}
+        yield {"event": "error", "data": json.dumps({"error": _brief_exception(e)})}
 
 
 async def _stream_response_with_mcp_mongo(llm, messages, system_prompt, mongo_db, session_id, agent_id, provider_record, start_time, native_tools, mcp_server_configs, kb_meta=None, agent=None, edit_target=None, past_messages=None):
@@ -4141,7 +4179,7 @@ async def _stream_response_with_mcp_mongo(llm, messages, system_prompt, mongo_db
                 if t:
                     _tool_hitl_map_mcp_mongo[t["name"]] = t
 
-    async with AsyncExitStack() as stack:
+    async with _managed_mcp_stack() as stack:
         mcp_connections, all_mcp_tools = await _connect_mcp_servers(stack, mcp_server_configs)
         tools = _merge_tools(native_tools, all_mcp_tools)
 
@@ -4518,7 +4556,7 @@ async def _stream_response_with_mcp_mongo(llm, messages, system_prompt, mongo_db
                     "session_id": session_id, "role": "assistant", "content": full_content,
                     "agent_id": agent_id, "metadata_json": json.dumps({"error": str(e)}),
                 })
-            yield {"event": "error", "data": json.dumps({"error": str(e)})}
+            yield {"event": "error", "data": json.dumps({"error": _brief_exception(e)})}
 
 
 # ---------------------------------------------------------------------------
@@ -4613,7 +4651,7 @@ async def _team_chat_coordinate_mongo(agents_with_providers, messages, mongo_db,
                 yield event
 
     except Exception as e:
-        yield {"event": "error", "data": json.dumps({"error": str(e)})}
+        yield {"event": "error", "data": json.dumps({"error": _brief_exception(e)})}
 
 
 async def _team_chat_route_mongo(agents_with_providers, messages, mongo_db, session_id, start_time, user_message):
@@ -4735,7 +4773,7 @@ async def _team_chat_route_mongo(agents_with_providers, messages, mongo_db, sess
         yield {"event": "done", "data": "{}"}
 
     except Exception as e:
-        yield {"event": "error", "data": json.dumps({"error": str(e)})}
+        yield {"event": "error", "data": json.dumps({"error": _brief_exception(e)})}
 
 
 async def _team_chat_collaborate_mongo(agents_with_providers, messages, mongo_db, session_id, start_time, user_message):

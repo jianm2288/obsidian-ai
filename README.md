@@ -37,6 +37,7 @@ Build, deploy, and orchestrate AI agents, multi-agent teams, and automated workf
   - [Agent Builder](#agent-builder)
   - [Multi-Agent Teams](#multi-agent-teams)
   - [Workflow Automation](#workflow-automation)
+  - [Default Workspace & Seeded Workflows](#default-workspace--seeded-workflows)
   - [Real-Time Chat Playground](#real-time-chat-playground)
   - [Artifacts](#artifacts)
   - [Tool Integration](#tool-integration)
@@ -105,6 +106,9 @@ Connect to any major LLM provider from a single interface. Add providers with en
 | **OpenRouter** | Access 100+ models through one API key | Cloud |
 | **Custom** | Any OpenAI-compatible endpoint (LM Studio, vLLM, etc.) | Self-hosted |
 
+- **Local-first defaults** - New SQLite workspaces include an Ollama `qwen3:8b` provider pointed at `http://localhost:11434` through `OLLAMA_BASE_URL`.
+- **Reasoning streams** - Ollama/Qwen thinking output and provider-native reasoning events stream into the playground reasoning panel when available.
+
 ---
 
 ### Agent Builder
@@ -152,6 +156,19 @@ Define multi-step workflows where each step is handled by a specific agent. Buil
 
 ---
 
+### Default Workspace & Seeded Workflows
+
+Fresh SQLite installs are bootstrapped from `backend/seed/default_workspace.json`, so the app starts with working examples instead of an empty canvas.
+
+- **Seeded providers** - Local `qwen3:8b` through Ollama (`OLLAMA_BASE_URL`, default `http://localhost:11434`) and a DeepSeek-compatible custom provider (`DEEPSEEK_BASE_URL`, `DEEPSEEK_API_KEY`)
+- **Seeded agents** - Research Agent, Deep Analyst, Report Producer, Local Helper, KB Librarian, debate agents, audience reviewers, and project planning reviewers
+- **Analyst Notes KB** - A local knowledge base intended for reusable Markdown notes and workflow output
+- **Research workflows** - Research Report with deliverables, Research to Deep Analyst Markdown, Report Producer from Prior Export, and Deep Analyst to Local KB
+- **Decision workflows** - Evidence Debate Panel and Development Planning Review for structured multi-agent review and verdict/approval loops
+- **Export replay** - Saved Markdown reports can be read back from `backend/exports` and turned into PDF, DOCX, PPTX, XLSX, CSV, HTML, or Markdown deliverables
+
+---
+
 ### Real-Time Chat Playground
 
 A full-featured chat interface for interacting with agents, teams, and workflows. Powered by Server-Sent Events (SSE) for real-time streaming.
@@ -194,11 +211,15 @@ When an agent produces substantial standalone content — an HTML page, a code f
 
 Equip agents with tools using pre-built templates or custom definitions. Tools are defined with JSON Schema parameters and can call external APIs, run Python code, or use built-in functions.
 
-| Template | Description |
+| Template / Built-in | Description |
 |----------|-------------|
 | **Weather Lookup** | Get current weather for any location |
 | **Calculator** | Evaluate mathematical expressions |
 | **Web Search** | Search the web for information |
+| **Fetch URL** | Read and extract text from public web pages, docs, and GitHub files |
+| **Read Export File** | Load prior workflow exports from `backend/exports` |
+| **Export Artifact** | Generate local Markdown, HTML, DOCX, PPTX, XLSX, CSV, or PDF files |
+| **Obsidian PDF Export** | Render Obsidian-friendly Markdown to higher-quality PDF when the local renderer is installed |
 | **Date & Time** | Get the current date and time |
 | **API Request** | Call any external REST API endpoint |
 | **Custom Python** | Write your own Python handler function |
@@ -534,7 +555,7 @@ Run with zero-config SQLite out of the box, or switch to MongoDB for production 
 ┌──────────────────────────────┐       ┌──────────────────────────────┐
 │         Frontend             │       │          Backend             │
 │    Next.js 16 + React 19     │──────>│     FastAPI + SQLAlchemy     │
-│    Port 3000                 │ /api  │     Port 8000                │
+│    Port 3000                 │ /api  │     Port 8001                │
 │                              │proxy  │                              │
 │  ┌────────┐ ┌─────────────┐ │       │  ┌──────────┐ ┌───────────┐ │
 │  │NextAuth│ │ Zustand      │ │       │  │ JWT Auth │ │ LLM       │ │
@@ -572,6 +593,8 @@ Run with zero-config SQLite out of the box, or switch to MongoDB for production 
 | [uv](https://docs.astral.sh/uv/) | Latest | Python package manager |
 | [npm](https://www.npmjs.com/) | 9+ | Node package manager |
 
+Optional for the seeded local agents: install [Ollama](https://ollama.com/) and run `ollama pull qwen3:8b`.
+
 ### Backend Setup
 
 ```bash
@@ -585,10 +608,10 @@ uv sync
 # Edit .env with your keys
 
 # Start the FastAPI development server
-uv run uvicorn main:app --reload
+uv run uvicorn main:app --reload --port 8001
 ```
 
-The backend API will be available at `http://localhost:8000`. Interactive docs at `http://localhost:8000/docs`.
+The backend API will be available at `http://localhost:8001`. Interactive docs at `http://localhost:8001/docs`.
 
 ### Frontend Setup
 
@@ -747,7 +770,7 @@ This image includes Python 3.12, Node.js 20, and common dev tools. It only needs
 npm run dev
 ```
 
-This starts both the frontend and backend concurrently.
+This starts the frontend on `http://localhost:3000`, the backend on `http://localhost:8001`, and the WhatsApp bridge on `http://localhost:3200`.
 
 ### Environment Variables
 
@@ -782,6 +805,11 @@ RATE_LIMIT_API_CLIENT=100
 # Database type: "sqlite" (default) or "mongo"
 DATABASE_TYPE=sqlite
 
+# Optional provider defaults used by the seeded workspace
+OLLAMA_BASE_URL=http://localhost:11434
+DEEPSEEK_BASE_URL=https://api.deepseek.com
+DEEPSEEK_API_KEY=...
+
 # Tavily Search API key — required for the web_search agent tool
 # Get a free key (1000 searches/month) at https://app.tavily.com
 TAVILY_API_KEY=tvly-...
@@ -806,6 +834,9 @@ AUTH_URL=http://localhost:3000
 
 # Public encryption key (must match backend ENCRYPTION_KEY)
 NEXT_PUBLIC_ENCRYPTION_KEY=your-encryption-key
+
+# Direct SSE backend URL used by the chat stream client
+NEXT_PUBLIC_BACKEND_URL=http://localhost:8001
 ```
 
 ---
@@ -830,7 +861,9 @@ Switch to the **Teams** tab, click **+**, and combine multiple agents. Choose a 
 
 ### 5. Create a Workflow
 
-From the **Dashboard**, click **Create Workflow**. Add sequential steps, each assigned to a specific agent with custom instructions. Run the workflow and watch each step execute in real-time.
+From the **Dashboard**, click **Create Workflow**. Add sequential steps or a visual DAG, each assigned to a specific agent with custom instructions. Run the workflow and watch each step execute in real-time.
+
+Seeded workflows are also available out of the box: **Deep Analyst to Local KB** saves a cleaned Markdown note into `Analyst Notes`, **Research Report with Deliverables** exports polished files, **Report Producer from Prior Export** reuses saved Markdown from `backend/exports`, and **Evidence Debate Panel** runs a structured pro/con review.
 
 ### 6. Configure MCP Servers
 
@@ -854,8 +887,8 @@ Navigate to the **Admin** panel to create users, assign roles (Admin/Guest), and
 
 The backend exposes a RESTful API with interactive documentation:
 
-- **Swagger UI** — `http://localhost:8000/docs`
-- **ReDoc** — `http://localhost:8000/redoc`
+- **Swagger UI** — `http://localhost:8001/docs`
+- **ReDoc** — `http://localhost:8001/redoc`
 
 ### Key Endpoints
 
@@ -891,8 +924,9 @@ The backend exposes a RESTful API with interactive documentation:
 | **Tools** | `/tools` | POST | Create a tool definition |
 | **MCP** | `/mcp-servers` | GET | List MCP server configurations |
 | **MCP** | `/mcp-servers/{id}/test` | POST | Test MCP server connection |
-| **Knowledge** | `/knowledge` | GET | List knowledge bases |
-| **Knowledge** | `/knowledge/{id}/documents` | POST | Add a document to a knowledge base |
+| **Knowledge** | `/knowledge-bases` | GET / POST | List or create knowledge bases |
+| **Knowledge** | `/knowledge-bases/{id}` | GET / PUT / DELETE | Get, update, or delete a knowledge base |
+| **Knowledge** | `/knowledge-bases/{id}/documents` | POST | Add a document to a knowledge base |
 | **Memory** | `/memory/agents/{id}` | GET | List agent memories |
 | **Memory** | `/memory/agents/{id}` | DELETE | Clear all agent memories |
 | **Versions** | `/versions/agents/{id}` | GET | List agent version snapshots |
@@ -933,7 +967,7 @@ Generate API client credentials from **Settings** to access the API programmatic
 ```bash
 curl -H "X-API-Key: your-client-id" \
      -H "X-API-Secret: your-client-secret" \
-     http://localhost:8000/agents
+     http://localhost:8001/agents
 ```
 
 ---

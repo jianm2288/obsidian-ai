@@ -5,7 +5,7 @@
     {
       "name": "qwen3:8b",
       "provider_type": "ollama",
-      "base_url": "http://172.20.170.55:11435",
+      "base_url": "http://localhost:11434",
       "model_id": null,
       "is_active": true,
       "config": null,

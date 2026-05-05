@@ -7,7 +7,6 @@ import Link from "next/link"
 import { useDashboardStore } from "@/stores/dashboard-store"
 import { usePlaygroundStore } from "@/stores/playground-store"
 import { usePermissionsStore } from "@/stores/permissions-store"
-import { apiClient } from "@/lib/api-client"
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card"
 import { AnimatedList, AnimatedListItem } from "@/components/ui/animated-list"
 import { Button } from "@/components/ui/button"
@@ -517,7 +516,13 @@ export default function HomePage() {
         agent={editingAgent}
         onSaved={() => fetchAll()}
       />
-      <TeamDialog open={teamDialogOpen} onOpenChange={setTeamDialogOpen} />
+      <TeamDialog
+        open={teamDialogOpen}
+        onOpenChange={setTeamDialogOpen}
+        agents={agents}
+        teams={teams}
+        onSaved={() => fetchAll()}
+      />
       <WorkflowDialog
         open={workflowDialogOpen}
         onOpenChange={(open) => {
