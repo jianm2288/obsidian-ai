@@ -105,7 +105,6 @@ function isInternalKbExportWorkflow(workflow: Workflow | null): boolean {
     && choices.includes("raw")
     && choices.includes("synthesis")
   return hasInternalExportChoices
-    || workflow.name === "Internal KB to Ext KB"
     || workflow.name === "Internal KB to External KB"
 }
 

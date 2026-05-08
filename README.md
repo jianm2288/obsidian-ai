@@ -164,7 +164,7 @@ Fresh SQLite installs are bootstrapped from `backend/seed/default_workspace.json
 - **Seeded providers** - Local `qwen3:8b` through Ollama (`OLLAMA_BASE_URL`, default `http://localhost:11434`) and a DeepSeek-compatible custom provider (`DEEPSEEK_BASE_URL`, `DEEPSEEK_API_KEY`)
 - **Seeded agents** - Research Agent, Deep Analyst, Report Producer, Local Helper, KB Librarian, debate agents, audience reviewers, and project planning reviewers
 - **Analyst Notes KB** - A local knowledge base intended for reusable Markdown notes and workflow output
-- **Research and export workflows** - Research Report with deliverables, Research to Deep Analyst Markdown, Report Producer from Prior Export, Deep Analyst to Local KB, and Internal KB to Ext KB
+- **Research and export workflows** - Research Report with deliverables, Research to Deep Analyst Markdown, Report Producer from Prior Export, Deep Analyst to Local KB, and Internal KB to External KB
 - **Decision workflows** - Evidence Debate Panel, Adversial Dialogue, and Development Planning Review for structured multi-agent review, debate, and verdict/approval loops
 - **Export replay** - Saved Markdown reports can be read back from `backend/exports` and turned into PDF, DOCX, PPTX, XLSX, CSV, HTML, or Markdown deliverables
 
@@ -903,7 +903,7 @@ Switch to the **Teams** tab, click **+**, and combine multiple agents. Choose a 
 
 From the **Dashboard**, click **Create Workflow**. Add sequential steps or a visual DAG, each assigned to a specific agent with custom instructions. Run the workflow and watch each step execute in real-time.
 
-Seeded workflows are also available out of the box: **Deep Analyst to Local KB** saves a cleaned Markdown note into `Analyst Notes`, **Research Report with Deliverables** exports polished files, **Report Producer from Prior Export** reuses saved Markdown from `backend/exports`, **Internal KB to Ext KB** exports selected internal KB documents to a configured external KB workflow, **Evidence Debate Panel** runs a structured pro/con review, and **Adversial Dialogue** runs five rounds of proponent/opponent debate.
+Seeded workflows are also available out of the box: **Deep Analyst to Local KB** saves a cleaned Markdown note into `Analyst Notes`, **Research Report with Deliverables** exports polished files, **Report Producer from Prior Export** reuses saved Markdown from `backend/exports`, **Internal KB to External KB** exports selected internal KB documents to a configured external KB workflow, **Evidence Debate Panel** runs a structured pro/con review, and **Adversial Dialogue** runs five rounds of proponent/opponent debate.
 
 ### 6. Configure MCP Servers
 
