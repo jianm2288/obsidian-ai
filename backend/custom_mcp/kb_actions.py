@@ -25,14 +25,16 @@ KB_CONFIGS: dict[str, dict[str, Any]] = {
         "name": "ultrasound_kb_actions",
         "root": ULTRASOUND_ROOT,
         "raw_root": ULTRASOUND_ROOT / "raw",
+        "raw_export_root": ULTRASOUND_ROOT / "raw" / "00-index" / "from-obsidian-ai",
         "wiki_root": ULTRASOUND_ROOT / "wiki",
+        "synthesis_export_root": ULTRASOUND_ROOT / "wiki" / "syntheses" / "_inbox" / "from-obsidian-ai",
         "index_path": ULTRASOUND_ROOT / "wiki" / "index.md",
         "log_path": ULTRASOUND_ROOT / "wiki" / "log.md",
         "rules_paths": [
             ULTRASOUND_ROOT / "AGENTS.md",
             ULTRASOUND_ROOT / ".agents" / "skills" / "ingest" / "SKILL.md",
         ],
-        "raw_targets": ["01-articles", "02-papers", "03-transcripts", "04-meeting_notes"],
+        "raw_targets": ["00-index", "01-articles", "02-papers", "03-transcripts", "04-meeting_notes"],
         "requires_topic": False,
     },
     "llm_wiki": {
@@ -145,6 +147,69 @@ def _job_dir(config: dict[str, Any]) -> Path:
     return path
 
 
+def _command_request_dir(config: dict[str, Any]) -> Path:
+    path = config["root"] / ".action-mcp" / "command-requests"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _relative_to_root(config: dict[str, Any], path: Path) -> str:
+    try:
+        return path.resolve().relative_to(config["root"].resolve()).as_posix()
+    except ValueError:
+        return str(path)
+
+
+def _record_followup_command(
+    config: dict[str, Any],
+    command_name: str,
+    target_path: Path,
+    summary: str,
+) -> dict[str, Any]:
+    rel_path = _relative_to_root(config, target_path)
+    command = f"/{command_name} {rel_path}"
+    job = {
+        "status": "pending",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "command": command,
+        "command_name": command_name,
+        "target_path": str(target_path),
+        "target_path_relative": rel_path,
+        "summary": summary,
+    }
+    job_path = _command_request_dir(config) / f"{_now_stamp()}-{command_name}-{_slugify(target_path.stem)}.json"
+    job_path.write_text(json.dumps(job, indent=2, ensure_ascii=False), encoding="utf-8")
+    return {
+        "invoked": True,
+        "command": command,
+        "command_name": command_name,
+        "request_path": str(job_path),
+        "status": "pending",
+    }
+
+
+def _safe_path_parts(value: str | None) -> list[str]:
+    if not value:
+        return []
+    return [part for part in Path(value).parts if part not in {"", ".", ".."}]
+
+
+def _append_subfolder_once(base_dir: Path, subfolder: str | None) -> Path:
+    target_dir = base_dir
+    for part in _safe_path_parts(subfolder):
+        if target_dir.name.lower() == part.lower():
+            continue
+        target_dir = target_dir / part
+    return target_dir
+
+
+def _markdown_filename(filename: str | None, default_name: str) -> str:
+    name = Path(filename).name if filename else default_name
+    if not name.lower().endswith(".md"):
+        name += ".md"
+    return name
+
+
 def build_server(config_name: str) -> FastMCP:
     base_config = KB_CONFIGS[config_name]
     mcp = FastMCP(base_config["name"])
@@ -198,6 +263,8 @@ def build_server(config_name: str) -> FastMCP:
         filename: str | None = None,
         source: str | None = None,
         tags: list[str] | None = None,
+        subfolder: str | None = None,
+        invoke_followup: bool = True,
         topic: str | None = None,
     ) -> dict[str, Any]:
         """Save content as a raw source file for later reviewed ingest."""
@@ -207,11 +274,15 @@ def build_server(config_name: str) -> FastMCP:
         if target not in config["raw_targets"]:
             raise ValueError(f"Unsupported raw_target '{target}'. Use one of: {config['raw_targets']}")
 
-        raw_dir = _safe_child(config["raw_root"], config["raw_root"] / target)
+        if config_name == "ultrasound" and (raw_target is None or target == "00-index") and subfolder is None:
+            raw_dir = _safe_child(config["raw_root"], config.get("raw_export_root", config["raw_root"] / target))
+            target = _relative_to_root(config, raw_dir)
+        else:
+            raw_dir = _safe_child(config["raw_root"], config["raw_root"] / target)
+            if subfolder:
+                raw_dir = _safe_child(raw_dir, _append_subfolder_once(raw_dir, subfolder))
         raw_dir.mkdir(parents=True, exist_ok=True)
-        safe_name = filename or f"{_now_stamp()}-{_slugify(title)}.md"
-        if not safe_name.lower().endswith(".md"):
-            safe_name += ".md"
+        safe_name = _markdown_filename(filename, f"{_now_stamp()}-{_slugify(title)}.md")
         path = _safe_child(raw_dir, raw_dir / safe_name)
         if path.exists():
             path = _safe_child(raw_dir, raw_dir / f"{_now_stamp()}-{path.name}")
@@ -228,11 +299,72 @@ def build_server(config_name: str) -> FastMCP:
             f"{key}: {json.dumps(value, ensure_ascii=False)}" for key, value in frontmatter.items()
         ) + "\n---\n\n"
         path.write_text(header + content.strip() + "\n", encoding="utf-8")
+        followup = (
+            _record_followup_command(config, "ingest", path, f"Ingest raw import from Obsidian AI: {title}")
+            if invoke_followup
+            else None
+        )
         return {
             "saved": True,
             "path": str(path),
             "raw_target": target,
-            "next_step": "Call preview_ingest_plan, then request human approval before wiki synthesis.",
+            "selected_action": "save-to-raw",
+            "follow_up": followup,
+            "next_step": f"Follow-up command recorded: {followup['command']}" if followup else "Run /ingest for the saved raw file.",
+        }
+
+    @mcp.tool()
+    def save_to_synthesis(
+        title: str,
+        content: str,
+        filename: str | None = None,
+        source: str | None = None,
+        tags: list[str] | None = None,
+        subfolder: str | None = None,
+        invoke_followup: bool = True,
+        topic: str | None = None,
+    ) -> dict[str, Any]:
+        """Export reviewed Markdown directly into the KB synthesis area."""
+        config = _resolve_config(base_config, topic)
+        _require_available(config)
+        export_root = config.get("synthesis_export_root")
+        if export_root is None:
+            raise ValueError("This KB does not define a synthesis export folder.")
+
+        target_dir = _safe_child(config["wiki_root"], Path(export_root))
+        if subfolder:
+            target_dir = _safe_child(target_dir, _append_subfolder_once(target_dir, subfolder))
+        target_dir.mkdir(parents=True, exist_ok=True)
+
+        safe_name = _markdown_filename(filename, f"{_slugify(title)}.md")
+        path = _safe_child(target_dir, target_dir / safe_name)
+        if path.exists():
+            path = _safe_child(target_dir, target_dir / f"{_now_stamp()}-{path.name}")
+
+        frontmatter = {
+            "title": title,
+            "exported_by": base_config["name"],
+            "exported_at": datetime.now(timezone.utc).isoformat(),
+            "source": source or "",
+            "tags": tags or [],
+            "origin": "obsidian-ai-internal-kb",
+        }
+        header = "---\n" + "\n".join(
+            f"{key}: {json.dumps(value, ensure_ascii=False)}" for key, value in frontmatter.items()
+        ) + "\n---\n\n"
+        path.write_text(header + content.strip() + "\n", encoding="utf-8")
+        followup = (
+            _record_followup_command(config, "sync-import", path, f"Sync synthesis import from Obsidian AI: {title}")
+            if invoke_followup
+            else None
+        )
+        return {
+            "saved": True,
+            "path": str(path),
+            "folder": str(target_dir),
+            "selected_action": "save-to-synthesis",
+            "follow_up": followup,
+            "next_step": f"Follow-up command recorded: {followup['command']}" if followup else "Run /sync-import for the saved synthesis file.",
         }
 
     @mcp.tool()

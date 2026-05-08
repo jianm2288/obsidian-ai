@@ -25,3 +25,5 @@ backend/uploads/
 backend/rag_indexes/
 backend/mcp_data/
 backend/exports/
+backend/Research_Notes/
+.obsidian/

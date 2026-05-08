@@ -10,6 +10,8 @@ import {
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Textarea } from "@/components/ui/textarea"
+import { Label } from "@/components/ui/label"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { useSession } from "next-auth/react"
 import {
   streamWorkflow,
@@ -18,7 +20,8 @@ import {
   type StepCompleteEvent,
   type WorkflowCompleteEvent,
 } from "@/lib/stream"
-import type { Workflow, Agent } from "@/types/playground"
+import { apiClient } from "@/lib/api-client"
+import type { Workflow, Agent, KnowledgeBase, KBDocument } from "@/types/playground"
 import {
   Play,
   Loader2,
@@ -95,6 +98,54 @@ function getDefaultRunInput(workflow: Workflow): string {
   return ""
 }
 
+function isInternalKbExportWorkflow(workflow: Workflow | null): boolean {
+  if (!workflow) return false
+  const choices = workflow.config?.export_action_choices
+  const hasInternalExportChoices = Array.isArray(choices)
+    && choices.includes("raw")
+    && choices.includes("synthesis")
+  return hasInternalExportChoices
+    || workflow.name === "Internal KB to Ext KB"
+    || workflow.name === "Internal KB to External KB"
+}
+
+function internalKbExportInput(params: {
+  kb?: KnowledgeBase
+  doc?: KBDocument
+  action: string
+  previous?: string
+}): string {
+  const previous = params.previous || ""
+  const field = (name: string) => {
+    const match = previous.match(new RegExp(`${name}:\\n([\\s\\S]*?)(?=\\n\\n[A-Za-z /]+:|$)`))
+    return match?.[1]?.trim() || ""
+  }
+  const title = field("Output title")
+  const filename = field("Output filename")
+  const tags = field("Tags")
+  const notes = field("Notes")
+  return `Internal KB:
+${params.kb ? `${params.kb.name} (ID: ${params.kb.id})` : "[Select an internal KB]"}
+
+Document/File:
+${params.doc ? `${params.doc.name} (ID: ${params.doc.id})` : "[Select a document/file]"}
+
+Export action:
+${params.action || "[Choose exactly one: raw | synthesis]"}
+
+Output title:
+${title || "[Optional: leave blank to use the internal document name]"}
+
+Output filename:
+${filename || "[Optional: leave blank to auto-generate a .md filename]"}
+
+Tags:
+${tags || "[Optional: comma-separated tags, e.g. ultrasound, from-obsidian-ai]"}
+
+Notes:
+${notes || "[Optional: preserve as-is by default; say if light Markdown cleanup is desired.]"}`
+}
+
 function readFileAsDataUrl(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader()
@@ -168,21 +219,57 @@ export function WorkflowRunDialog({
   const [attachedLinks, setAttachedLinks] = useState<WorkflowScopedLinks | null>(null)
   const [attachmentError, setAttachmentError] = useState<string | null>(null)
   const workflowId = workflow?.id ?? ""
+  const isInternalKbExport = isInternalKbExportWorkflow(workflow)
+  const externalReferencesEnabled = !isInternalKbExport
+  const exportActionChoices = useMemo(
+    () => Array.isArray(workflow?.config?.export_action_choices)
+      ? workflow.config.export_action_choices.filter((choice): choice is string => typeof choice === "string")
+      : [],
+    [workflow],
+  )
+  const [internalKbs, setInternalKbs] = useState<KnowledgeBase[]>([])
+  const [internalDocs, setInternalDocs] = useState<KBDocument[]>([])
+  const [selectedInternalKbId, setSelectedInternalKbId] = useState("")
+  const [selectedInternalDocId, setSelectedInternalDocId] = useState("")
+  const [selectedExportAction, setSelectedExportAction] = useState("synthesis")
   const savedDraft = useMemo(() => {
     if (!open || !workflowId || typeof window === "undefined") return null
     return loadWorkflowDraft(workflowId)
   }, [open, workflowId])
   const currentRunInput = runInput?.workflowId === workflowId ? runInput.input : savedDraft?.input ?? null
   const currentLinks = useMemo(
-    () => attachedLinks?.workflowId === workflowId ? attachedLinks.links : savedDraft?.links ?? [],
-    [attachedLinks, savedDraft, workflowId],
+    () => {
+      if (!externalReferencesEnabled) return []
+      return attachedLinks?.workflowId === workflowId ? attachedLinks.links : savedDraft?.links ?? []
+    },
+    [attachedLinks, externalReferencesEnabled, savedDraft, workflowId],
   )
+  const selectedInternalKb = internalKbs.find((kb) => String(kb.id) === selectedInternalKbId)
+  const selectedInternalDoc = internalDocs.find((doc) => String(doc.id) === selectedInternalDocId)
 
   useEffect(() => {
     if (outputRef.current) {
       outputRef.current.scrollTop = outputRef.current.scrollHeight
     }
   }, [finalOutput, stepOutputs, streamingStepOrder])
+
+  useEffect(() => {
+    if (!open || !isInternalKbExport || !session?.accessToken) return
+    apiClient.setAccessToken(session.accessToken)
+    apiClient.listKnowledgeBases()
+      .then(setInternalKbs)
+      .catch(() => setInternalKbs([]))
+  }, [open, isInternalKbExport, session?.accessToken])
+
+  useEffect(() => {
+    if (!open || !isInternalKbExport || !selectedInternalKbId || !session?.accessToken) {
+      return
+    }
+    apiClient.setAccessToken(session.accessToken)
+    apiClient.listKBDocuments(selectedInternalKbId)
+      .then(setInternalDocs)
+      .catch(() => setInternalDocs([]))
+  }, [open, isInternalKbExport, selectedInternalKbId, session?.accessToken])
 
   useEffect(() => {
     if (!open || !workflowId) return
@@ -221,10 +308,15 @@ export function WorkflowRunDialog({
     setAttachedLinks(null)
     setLinkInput("")
     setAttachmentError(null)
+    setInternalDocs([])
+    setSelectedInternalKbId("")
+    setSelectedInternalDocId("")
+    setSelectedExportAction("synthesis")
     if (fileInputRef.current) fileInputRef.current.value = ""
   }
 
   const handleAttachFiles = async (files: FileList | null) => {
+    if (!externalReferencesEnabled) return
     if (!files || files.length === 0) return
     setAttachmentError(null)
     try {
@@ -245,6 +337,7 @@ export function WorkflowRunDialog({
   }
 
   const handleAddLink = () => {
+    if (!externalReferencesEnabled) return
     const value = linkInput.trim()
     if (!value || !workflowId) return
     setAttachedLinks((prev) => ({
@@ -256,6 +349,7 @@ export function WorkflowRunDialog({
   }
 
   const workflowInputWithLinks = (input: string) => {
+    if (!externalReferencesEnabled) return input
     if (currentLinks.length === 0) return input
     return `${input.trim()}\n\nBackground file links:\n${currentLinks.map((link) => `- ${link}`).join("\n")}`
   }
@@ -274,7 +368,8 @@ export function WorkflowRunDialog({
     if (!session?.accessToken || !workflow || isRunning) return
 
     const workflowInput = workflowInputWithLinks(currentRunInput ?? getDefaultRunInput(workflow)).trim()
-    if (!workflowInput && attachments.length === 0) {
+    const workflowAttachments = externalReferencesEnabled ? attachments : []
+    if (!workflowInput && workflowAttachments.length === 0) {
       setError("Enter workflow input before running.")
       return
     }
@@ -336,7 +431,7 @@ export function WorkflowRunDialog({
           setStatus("failed")
         },
         controller.signal,
-        attachments,
+        workflowAttachments,
         (event) => {
           const idx = stepIndexByNodeId(event.node_id)
           const step = stepByNodeId(event.node_id)
@@ -403,7 +498,25 @@ export function WorkflowRunDialog({
 
   const sortedSteps = [...workflow.steps].sort((a, b) => a.order - b.order)
   const effectiveRunInput = currentRunInput ?? getDefaultRunInput(workflow)
-  const canRun = effectiveRunInput.trim().length > 0 || attachments.length > 0 || currentLinks.length > 0
+  const canRun = isInternalKbExport
+    ? Boolean(selectedInternalKbId && selectedInternalDocId && selectedExportAction && effectiveRunInput.trim().length > 0)
+    : effectiveRunInput.trim().length > 0 || attachments.length > 0 || currentLinks.length > 0
+  const updateInternalKbExportInput = (params: {
+    kb?: KnowledgeBase
+    doc?: KBDocument | null
+    action?: string
+  }) => {
+    if (!workflowId) return
+    setRunInput({
+      workflowId,
+      input: internalKbExportInput({
+        kb: params.kb ?? selectedInternalKb,
+        doc: params.doc === null ? undefined : params.doc ?? selectedInternalDoc,
+        action: params.action ?? selectedExportAction,
+        previous: effectiveRunInput,
+      }),
+    })
+  }
 
   const getStepName = (step: typeof sortedSteps[0]) => {
     if (step.node_type && step.node_type !== "agent") {
@@ -548,6 +661,81 @@ export function WorkflowRunDialog({
                       </p>
                     </div>
                   </div>
+                  {isInternalKbExport && (
+                    <div className="grid gap-3 rounded-md border bg-muted/20 p-3 md:grid-cols-[1fr_1fr_12rem]">
+                      <div className="space-y-1.5">
+                        <Label className="text-xs">Internal KB</Label>
+                        <Select
+                          value={selectedInternalKbId}
+                          onValueChange={(value) => {
+                            const nextKb = internalKbs.find((kb) => String(kb.id) === value)
+                            setSelectedInternalKbId(value)
+                            setSelectedInternalDocId("")
+                            setInternalDocs([])
+                            updateInternalKbExportInput({ kb: nextKb, doc: null })
+                            if (error) setError(null)
+                          }}
+                        >
+                          <SelectTrigger className="w-full">
+                            <SelectValue placeholder="Select KB" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {internalKbs.map((kb) => (
+                              <SelectItem key={kb.id} value={String(kb.id)}>
+                                {kb.name}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label className="text-xs">Document/File</Label>
+                        <Select
+                          value={selectedInternalDocId}
+                          onValueChange={(value) => {
+                            const nextDoc = internalDocs.find((doc) => String(doc.id) === value)
+                            setSelectedInternalDocId(value)
+                            updateInternalKbExportInput({ doc: nextDoc })
+                            if (error) setError(null)
+                          }}
+                          disabled={!selectedInternalKbId}
+                        >
+                          <SelectTrigger className="w-full">
+                            <SelectValue placeholder={selectedInternalKbId ? "Select document" : "Select KB first"} />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {internalDocs.map((doc) => (
+                              <SelectItem key={doc.id} value={String(doc.id)}>
+                                {doc.name}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label className="text-xs">Export action</Label>
+                        <Select
+                          value={selectedExportAction}
+                          onValueChange={(value) => {
+                            setSelectedExportAction(value)
+                            updateInternalKbExportInput({ action: value })
+                            if (error) setError(null)
+                          }}
+                        >
+                          <SelectTrigger className="w-full">
+                            <SelectValue placeholder="Action" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {(exportActionChoices.length ? exportActionChoices : ["raw", "synthesis"]).map((choice) => (
+                              <SelectItem key={choice} value={choice}>
+                                {choice}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                    </div>
+                  )}
                   <Textarea
                     value={effectiveRunInput}
                     onChange={(event) => {
@@ -557,86 +745,88 @@ export function WorkflowRunDialog({
                     placeholder="Ultrasound volume imaging analysis..."
                     className="w-full min-h-[min(42vh,28rem)] max-h-[46vh] resize-y overflow-y-auto text-left font-mono text-xs leading-relaxed"
                   />
-                  <div className="w-full space-y-2">
-                    <input
-                      ref={fileInputRef}
-                      type="file"
-                      multiple
-                      accept=".txt,.md,.markdown,.pdf,.docx,text/plain,text/markdown,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-                      className="hidden"
-                      onChange={(event) => void handleAttachFiles(event.target.files)}
-                    />
-                    <div className="flex flex-col gap-2 sm:flex-row">
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        className="gap-2 shrink-0"
-                        onClick={() => fileInputRef.current?.click()}
-                      >
-                        <Paperclip className="h-3.5 w-3.5" />
-                        Attach File
-                      </Button>
-                      <div className="flex min-w-0 flex-1 items-center gap-2">
-                        <div className="relative flex-1">
-                          <Link2 className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
-                          <input
-                            value={linkInput}
-                            onChange={(event) => setLinkInput(event.target.value)}
-                            onKeyDown={(event) => {
-                              if (event.key === "Enter") {
-                                event.preventDefault()
-                                handleAddLink()
-                              }
-                            }}
-                            placeholder="https://..."
-                            className="h-9 w-full rounded-md border border-input bg-transparent pl-8 pr-3 text-xs outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
-                          />
-                        </div>
-                        <Button type="button" variant="outline" size="sm" onClick={handleAddLink} disabled={!linkInput.trim()}>
-                          Add Link
+                  {externalReferencesEnabled && (
+                    <div className="w-full space-y-2">
+                      <input
+                        ref={fileInputRef}
+                        type="file"
+                        multiple
+                        accept=".txt,.md,.markdown,.pdf,.docx,text/plain,text/markdown,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                        className="hidden"
+                        onChange={(event) => void handleAttachFiles(event.target.files)}
+                      />
+                      <div className="flex flex-col gap-2 sm:flex-row">
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="gap-2 shrink-0"
+                          onClick={() => fileInputRef.current?.click()}
+                        >
+                          <Paperclip className="h-3.5 w-3.5" />
+                          Attach File
                         </Button>
-                      </div>
-                    </div>
-                    {(attachments.length > 0 || currentLinks.length > 0) && (
-                      <div className="max-h-24 overflow-y-auto rounded-md border border-border/60 bg-muted/10 p-2">
-                        <div className="flex flex-wrap gap-2">
-                          {attachments.map((file, index) => (
-                            <Badge key={`${file.filename}-${index}`} variant="outline" className="gap-1.5 px-2 py-1 text-[11px]">
-                              <Paperclip className="h-3 w-3" />
-                              <span className="max-w-56 truncate">{file.filename}</span>
-                              <button
-                                type="button"
-                                onClick={() => setAttachments((prev) => prev.filter((_, i) => i !== index))}
-                                className="rounded-sm text-muted-foreground hover:text-foreground"
-                                aria-label={`Remove ${file.filename}`}
-                              >
-                                <X className="h-3 w-3" />
-                              </button>
-                            </Badge>
-                          ))}
-                          {currentLinks.map((link, index) => (
-                            <Badge key={`${link}-${index}`} variant="outline" className="gap-1.5 px-2 py-1 text-[11px]">
-                              <Link2 className="h-3 w-3" />
-                              <span className="max-w-72 truncate">{link}</span>
-                              <button
-                                type="button"
-                                onClick={() => setAttachedLinks({
-                                  workflowId,
-                                  links: currentLinks.filter((_, i) => i !== index),
-                                })}
-                                className="rounded-sm text-muted-foreground hover:text-foreground"
-                                aria-label={`Remove ${link}`}
-                              >
-                                <X className="h-3 w-3" />
-                              </button>
-                            </Badge>
-                          ))}
+                        <div className="flex min-w-0 flex-1 items-center gap-2">
+                          <div className="relative flex-1">
+                            <Link2 className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+                            <input
+                              value={linkInput}
+                              onChange={(event) => setLinkInput(event.target.value)}
+                              onKeyDown={(event) => {
+                                if (event.key === "Enter") {
+                                  event.preventDefault()
+                                  handleAddLink()
+                                }
+                              }}
+                              placeholder="https://..."
+                              className="h-9 w-full rounded-md border border-input bg-transparent pl-8 pr-3 text-xs outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
+                            />
+                          </div>
+                          <Button type="button" variant="outline" size="sm" onClick={handleAddLink} disabled={!linkInput.trim()}>
+                            Add Link
+                          </Button>
                         </div>
                       </div>
-                    )}
-                  </div>
-                  {(error || attachmentError) && (
+                      {(attachments.length > 0 || currentLinks.length > 0) && (
+                        <div className="max-h-24 overflow-y-auto rounded-md border border-border/60 bg-muted/10 p-2">
+                          <div className="flex flex-wrap gap-2">
+                            {attachments.map((file, index) => (
+                              <Badge key={`${file.filename}-${index}`} variant="outline" className="gap-1.5 px-2 py-1 text-[11px]">
+                                <Paperclip className="h-3 w-3" />
+                                <span className="max-w-56 truncate">{file.filename}</span>
+                                <button
+                                  type="button"
+                                  onClick={() => setAttachments((prev) => prev.filter((_, i) => i !== index))}
+                                  className="rounded-sm text-muted-foreground hover:text-foreground"
+                                  aria-label={`Remove ${file.filename}`}
+                                >
+                                  <X className="h-3 w-3" />
+                                </button>
+                              </Badge>
+                            ))}
+                            {currentLinks.map((link, index) => (
+                              <Badge key={`${link}-${index}`} variant="outline" className="gap-1.5 px-2 py-1 text-[11px]">
+                                <Link2 className="h-3 w-3" />
+                                <span className="max-w-72 truncate">{link}</span>
+                                <button
+                                  type="button"
+                                  onClick={() => setAttachedLinks({
+                                    workflowId,
+                                    links: currentLinks.filter((_, i) => i !== index),
+                                  })}
+                                  className="rounded-sm text-muted-foreground hover:text-foreground"
+                                  aria-label={`Remove ${link}`}
+                                >
+                                  <X className="h-3 w-3" />
+                                </button>
+                              </Badge>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  {(error || (externalReferencesEnabled && attachmentError)) && (
                     <div className="rounded-md border border-red-500/20 bg-red-500/5 px-3 py-2 text-xs text-red-400">
                       {error || attachmentError}
                     </div>
