@@ -801,6 +801,164 @@
       "is_active": true
     },
     {
+      "name": "Adversial Dialogue",
+      "description": "Run a five-round interactive dialogue between Proponent and Oponent about a statement, optional background descriptions, and supporting evidence documents.",
+      "steps": [
+        {
+          "id": "round_1_proponent",
+          "node_type": "agent",
+          "task": "Round 1 of 5, Proponent opening. Read the workflow input carefully. The statement is required; background descriptions, supporting evidence documents, links, and attachments are optional. Treat background as context and evidence to evaluate, not as automatic truth. Restate the exact statement and summarize available background/evidence so the full dialogue record carries the original input forward. Build the strongest fair affirmative case, identify assumptions and limits, and end with focused challenges for Oponent.",
+          "order": 1,
+          "depends_on": [],
+          "config": null,
+          "agent_name": "Debate Proponent"
+        },
+        {
+          "id": "round_1_oponent",
+          "node_type": "agent",
+          "task": "Round 1 of 5, Oponent opening. Read Proponent's opening as the carried-forward workflow input and debate record. Challenge the statement directly: identify weak evidence, missing assumptions, alternative explanations, scope problems, and practical objections. Concede any clearly strong affirmative points, then end with focused challenges for Proponent.",
+          "order": 2,
+          "depends_on": [
+            "round_1_proponent"
+          ],
+          "config": null,
+          "agent_name": "Debate Opponent"
+        },
+        {
+          "id": "round_2_proponent",
+          "node_type": "agent",
+          "task": "Round 2 of 5, Proponent reply. Use the full upstream debate record. Answer Oponent's strongest objections directly before adding new affirmative reasoning. Clarify definitions, repair weak links, distinguish what is proven from what remains uncertain, and end with the next questions Oponent should answer.",
+          "order": 3,
+          "depends_on": [
+            "round_1_proponent",
+            "round_1_oponent"
+          ],
+          "config": null,
+          "agent_name": "Debate Proponent"
+        },
+        {
+          "id": "round_2_oponent",
+          "node_type": "agent",
+          "task": "Round 2 of 5, Oponent reply. Use the full upstream debate record. Answer Proponent's round 2 repairs and new affirmative reasoning directly. Press unresolved evidence gaps, overclaims, ambiguity, and alternative interpretations. Concede any points that now look established, and end with the next questions Proponent should answer.",
+          "order": 4,
+          "depends_on": [
+            "round_1_proponent",
+            "round_1_oponent",
+            "round_2_proponent"
+          ],
+          "config": null,
+          "agent_name": "Debate Opponent"
+        },
+        {
+          "id": "round_3_proponent",
+          "node_type": "agent",
+          "task": "Round 3 of 5, Proponent reply. Use the full upstream debate record. Narrow the debate to the decisive issues, answer Oponent's strongest remaining objections, and strengthen the affirmative case without repeating settled material. Make any necessary concessions explicit, and end with focused challenges for Oponent.",
+          "order": 5,
+          "depends_on": [
+            "round_1_proponent",
+            "round_1_oponent",
+            "round_2_proponent",
+            "round_2_oponent"
+          ],
+          "config": null,
+          "agent_name": "Debate Proponent"
+        },
+        {
+          "id": "round_3_oponent",
+          "node_type": "agent",
+          "task": "Round 3 of 5, Oponent reply. Use the full upstream debate record. Focus on the decisive issues identified so far. Test whether Proponent's narrowed affirmative case actually establishes the statement as stated, and press any remaining evidentiary, logical, definitional, or practical weaknesses. End with focused challenges for Proponent.",
+          "order": 6,
+          "depends_on": [
+            "round_1_proponent",
+            "round_1_oponent",
+            "round_2_proponent",
+            "round_2_oponent",
+            "round_3_proponent"
+          ],
+          "config": null,
+          "agent_name": "Debate Opponent"
+        },
+        {
+          "id": "round_4_proponent",
+          "node_type": "agent",
+          "task": "Round 4 of 5, Proponent reply. Use the full upstream debate record. Prepare the affirmative case for closing: answer the hardest remaining objections, state what the dialogue has established, identify what remains uncertain, and explain why the statement should still be accepted or conditionally accepted. End with final issues Oponent must address.",
+          "order": 7,
+          "depends_on": [
+            "round_1_proponent",
+            "round_1_oponent",
+            "round_2_proponent",
+            "round_2_oponent",
+            "round_3_proponent",
+            "round_3_oponent"
+          ],
+          "config": null,
+          "agent_name": "Debate Proponent"
+        },
+        {
+          "id": "round_4_oponent",
+          "node_type": "agent",
+          "task": "Round 4 of 5, Oponent reply. Use the full upstream debate record. Prepare the opposing case for closing: answer Proponent's strongest repaired argument, state what remains unproven or overclaimed, identify any conditions under which a narrower statement might be acceptable, and end with final issues Proponent must address.",
+          "order": 8,
+          "depends_on": [
+            "round_1_proponent",
+            "round_1_oponent",
+            "round_2_proponent",
+            "round_2_oponent",
+            "round_3_proponent",
+            "round_3_oponent",
+            "round_4_proponent"
+          ],
+          "config": null,
+          "agent_name": "Debate Opponent"
+        },
+        {
+          "id": "round_5_proponent",
+          "node_type": "agent",
+          "task": "Round 5 of 5, Proponent closing. Use the full upstream debate record. Give a concise affirmative closing that answers Oponent's final issues, summarizes the best evidence and reasoning for the statement, acknowledges unresolved uncertainty, and states the strongest version of the conclusion Proponent can responsibly defend.",
+          "order": 9,
+          "depends_on": [
+            "round_1_proponent",
+            "round_1_oponent",
+            "round_2_proponent",
+            "round_2_oponent",
+            "round_3_proponent",
+            "round_3_oponent",
+            "round_4_proponent",
+            "round_4_oponent"
+          ],
+          "config": null,
+          "agent_name": "Debate Proponent"
+        },
+        {
+          "id": "round_5_oponent",
+          "node_type": "agent",
+          "task": "Round 5 of 5, Oponent closing. Use the full upstream debate record, including Proponent's closing. Give a concise opposing closing that answers Proponent's final case, summarizes the best objections and counter-evidence, acknowledges any affirmative points that survived, and states whether the statement should be rejected, narrowed, or accepted only conditionally. Do not write as a neutral judge; remain Oponent.",
+          "order": 10,
+          "depends_on": [
+            "round_1_proponent",
+            "round_1_oponent",
+            "round_2_proponent",
+            "round_2_oponent",
+            "round_3_proponent",
+            "round_3_oponent",
+            "round_4_proponent",
+            "round_4_oponent",
+            "round_5_proponent"
+          ],
+          "config": null,
+          "agent_name": "Debate Opponent"
+        }
+      ],
+      "config": {
+        "input_label": "Statement and optional evidence",
+        "input_placeholder": "State the proposition for Proponent to defend. Optionally paste background descriptions, supporting evidence, links, or attach documents.",
+        "default_run_input": "Statement:\n[Replace this with the claim, thesis, decision, or perspective that Proponent should defend.]\n\nProponent perspective / background:\n[Optional: describe why this statement may be true, what context matters, and what assumptions Proponent should start from.]\n\nSupporting evidence documents or links:\n[Optional: paste citations, excerpts, URLs, or attach PDF/DOCX/TXT/Markdown files.]\n\nDialogue instructions:\n- Run 5 rounds of interactive dialogue between Proponent and Oponent.\n- Proponent should argue for the statement; Oponent should argue against or qualify it.\n- Both agents should evaluate supporting evidence rather than treating it as automatically true.\n- Later rounds should answer the strongest prior points and avoid merely repeating earlier arguments.\n- No audience panel or neutral verdict is required; the workflow ends after Oponent's round 5 closing.",
+        "auto_export": false,
+        "max_parallel_nodes": 1
+      },
+      "is_active": true
+    },
+    {
       "name": "Evidence Debate Panel",
       "description": "Debate a statement with optional background materials, targeted research, opening briefs, rebuttals, audience review, and a neutral verdict memo.",
       "steps": [
