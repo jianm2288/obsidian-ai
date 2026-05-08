@@ -319,6 +319,8 @@ def _load_mcp_configs(agent, db):
         config = {"id": str(s.id), "name": s.name, "transport_type": s.transport_type, "command": s.command, "args_json": s.args_json, "env_json": s.env_json, "url": s.url, "headers_json": s.headers_json}
         if _agent_uses_read_only_vaults(agent, s.name):
             config["allowed_mcp_tools"] = _READ_ONLY_VAULT_TOOLS
+        if s.name == "research_semantic_scholar":
+            config["blocked_mcp_tools"] = _SEMANTIC_SCHOLAR_SIDE_EFFECT_TOOLS
         configs.append(config)
     return configs
 
@@ -345,6 +347,8 @@ async def _load_mcp_configs_mongo(agent, mongo_db):
             server["id"] = str(server["_id"])
             if _agent_dict_uses_read_only_vaults(agent, server.get("name")):
                 server["allowed_mcp_tools"] = _READ_ONLY_VAULT_TOOLS
+            if server.get("name") == "research_semantic_scholar":
+                server["blocked_mcp_tools"] = _SEMANTIC_SCHOLAR_SIDE_EFFECT_TOOLS
             configs.append(server)
     return configs
 
@@ -365,6 +369,15 @@ _READ_ONLY_VAULT_TOOLS = {
     "get_frontmatter",
     "get_vault_stats",
     "list_all_tags",
+}
+_SEMANTIC_SCHOLAR_SIDE_EFFECT_TOOLS = {
+    "activate_project",
+    "create_project",
+    "export_file",
+    "list_memories",
+    "list_projects",
+    "read_export_file",
+    "write_memory",
 }
 
 
@@ -391,6 +404,13 @@ async def _connect_mcp_servers(stack, mcp_server_configs):
                     tool for tool in conn.tools
                     if tool.get("function", {}).get("name", "").split("__")[-1] in allowed_tools
                 ]
+            blocked_tools = set(config.get("blocked_mcp_tools") or [])
+            if blocked_tools:
+                conn.tools = [
+                    tool for tool in conn.tools
+                    if tool.get("function", {}).get("name", "").split("__")[-1] not in blocked_tools
+                ]
+            if allowed_tools or blocked_tools:
                 conn.tool_names = {
                     tool.get("function", {}).get("name", "")
                     for tool in conn.tools
