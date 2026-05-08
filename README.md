@@ -67,6 +67,7 @@ Build, deploy, and orchestrate AI agents, multi-agent teams, and automated workf
   - [Frontend Setup](#frontend-setup)
   - [Running Both Together](#running-both-together)
   - [Environment Variables](#environment-variables)
+  - [Local Data Migration](#local-data-migration)
 - [Usage Guide](#usage-guide)
 - [API Reference](#api-reference)
 - [Tech Stack](#tech-stack)
@@ -163,8 +164,8 @@ Fresh SQLite installs are bootstrapped from `backend/seed/default_workspace.json
 - **Seeded providers** - Local `qwen3:8b` through Ollama (`OLLAMA_BASE_URL`, default `http://localhost:11434`) and a DeepSeek-compatible custom provider (`DEEPSEEK_BASE_URL`, `DEEPSEEK_API_KEY`)
 - **Seeded agents** - Research Agent, Deep Analyst, Report Producer, Local Helper, KB Librarian, debate agents, audience reviewers, and project planning reviewers
 - **Analyst Notes KB** - A local knowledge base intended for reusable Markdown notes and workflow output
-- **Research workflows** - Research Report with deliverables, Research to Deep Analyst Markdown, Report Producer from Prior Export, and Deep Analyst to Local KB
-- **Decision workflows** - Evidence Debate Panel and Development Planning Review for structured multi-agent review and verdict/approval loops
+- **Research and export workflows** - Research Report with deliverables, Research to Deep Analyst Markdown, Report Producer from Prior Export, Deep Analyst to Local KB, and Internal KB to Ext KB
+- **Decision workflows** - Evidence Debate Panel, Adversial Dialogue, and Development Planning Review for structured multi-agent review, debate, and verdict/approval loops
 - **Export replay** - Saved Markdown reports can be read back from `backend/exports` and turned into PDF, DOCX, PPTX, XLSX, CSV, HTML, or Markdown deliverables
 
 ---
@@ -839,6 +840,45 @@ NEXT_PUBLIC_ENCRYPTION_KEY=your-encryption-key
 NEXT_PUBLIC_BACKEND_URL=http://localhost:8001
 ```
 
+### Local Data Migration
+
+Git should carry project structure, application code, scripts, UI changes, built-in tools, MCP definitions, and portable default workspace seeds. It should not carry local content, machine-specific runtime state, local vaults, generated exports, uploaded files, credentials, or local databases.
+
+The portable defaults that new SQLite installs receive are tracked in:
+
+```text
+backend/seed/default_workspace.json
+```
+
+Use that seed for default agents, tools, MCP servers, knowledge bases, and workflows that should ship with the project. Existing user-edited records are intentionally not overwritten by the seed sync.
+
+To move a personal/local workspace from one machine to another without GitHub, copy these files and folders manually as needed:
+
+| Local item | What it contains | Notes |
+|------------|------------------|-------|
+| `backend/app.db` | SQLite users, providers, agents, teams, workflows, tools, MCP server configs, prompt vault entries, settings, secrets metadata, KB metadata/documents, memories, sessions, workflow runs, and schedules | Copy with the backend stopped. Encrypted provider keys and secrets require the same `PROVIDER_KEY_SECRET`. |
+| `backend/.env` | Backend secrets and machine-specific environment variables | Keep private. Copy only between trusted machines. `ENCRYPTION_KEY` must match `frontend/.env.local`'s `NEXT_PUBLIC_ENCRYPTION_KEY`. |
+| `frontend/.env.local` | Frontend/NextAuth local settings | Keep private. Do not commit. |
+| `backend/uploads/` | Uploaded files used by sessions, KB docs, and workflow inputs | Copy if you need uploaded source files to remain available. |
+| `backend/rag_indexes/` | Local vector/RAG indexes | Can be copied for speed or regenerated from KB documents if indexing is supported. |
+| `backend/mcp_data/` | Local MCP server storage, such as downloaded paper/cache data | Machine-local cache; copy only if useful. |
+| `backend/exports/` | Generated Markdown, PDF, PPTX, DOCX, CSV, XLSX, HTML reports | Output artifacts, not source code. |
+| `backend/Research_Notes/` | Local research notes if used by your workflows | Private/local content. |
+| `local-notes/` | Local Obsidian-style notes vault used by the default `obsidian_notes` MCP | Private/local content. |
+| `.obsidian/` | Local Obsidian app metadata for this checkout | Machine/editor state, not project source. |
+| `app_data/` | Runtime app data cache/storage | Local runtime content. |
+| `wa-bridge/auth/` | WhatsApp bridge login/session credentials | Keep private. Copy only if you want to preserve an authenticated WhatsApp session. |
+
+If you use MongoDB (`DATABASE_TYPE=mongo`), export and restore the Mongo database instead of copying `backend/app.db`. Keep `MONGO_URL`, `MONGO_DB_NAME`, and encryption secrets out of Git.
+
+After pulling project code on a new machine:
+
+1. Install dependencies and create fresh `backend/.env` and `frontend/.env.local`.
+2. Start once to let the app create or sync the default workspace.
+3. Stop the app before replacing `backend/app.db` or copying large local folders.
+4. Copy only the local items you intentionally want to migrate.
+5. Restart the backend/frontend and re-test providers, MCP servers, KB access, and scheduled workflows.
+
 ---
 
 ## Usage Guide
@@ -863,7 +903,7 @@ Switch to the **Teams** tab, click **+**, and combine multiple agents. Choose a 
 
 From the **Dashboard**, click **Create Workflow**. Add sequential steps or a visual DAG, each assigned to a specific agent with custom instructions. Run the workflow and watch each step execute in real-time.
 
-Seeded workflows are also available out of the box: **Deep Analyst to Local KB** saves a cleaned Markdown note into `Analyst Notes`, **Research Report with Deliverables** exports polished files, **Report Producer from Prior Export** reuses saved Markdown from `backend/exports`, and **Evidence Debate Panel** runs a structured pro/con review.
+Seeded workflows are also available out of the box: **Deep Analyst to Local KB** saves a cleaned Markdown note into `Analyst Notes`, **Research Report with Deliverables** exports polished files, **Report Producer from Prior Export** reuses saved Markdown from `backend/exports`, **Internal KB to Ext KB** exports selected internal KB documents to a configured external KB workflow, **Evidence Debate Panel** runs a structured pro/con review, and **Adversial Dialogue** runs five rounds of proponent/opponent debate.
 
 ### 6. Configure MCP Servers
 
